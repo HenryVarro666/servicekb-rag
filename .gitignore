@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.env
+eval/reports/
+raw/
+# 聊天清洗的输出（可再生成；真实数据绝不能提交）
+data/sample/chat/teams_qa.jsonl
+data/sample/chat/review_queue.jsonl
+data/sample/chat/knowledge_gaps.jsonl
+data/sample/chat/cleaning_report.md

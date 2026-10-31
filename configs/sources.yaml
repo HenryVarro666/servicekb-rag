@@ -1,0 +1,59 @@
+# 数据源配置
+# ---------------------------------------------------------------------------
+# - name：数据源 ID（= source_id）。入库后不要改名，改名等于删掉旧源、新建一个源。
+# - type：connector 类型，见 src/servicekb/connectors/__init__.py 的 CONNECTOR_TYPES
+# - path：相对路径相对于**本文件所在目录**
+# - acl_groups：哪些用户组能检索到这个源的内容。由管理员在这里配置，文档本身不能改权限。
+# - enabled: false 可以临时停用某个源
+#
+# ⚠️ 顺序很重要：词典、物料主数据（对象层）要排在文档前面，
+#    文档入库时的实体链接才能用上最新的对象。
+
+sources:
+  # ---------------------------------------------------------------- 对象层
+  - name: dictionaries
+    type: entity_dictionary
+    path: ../data/sample/dictionaries/entity_aliases.yaml
+
+  - name: parts_master
+    type: parts_master
+    path: ../data/sample/parts/parts_master.csv
+    acl_groups: [public, service]
+
+  # ---------------------------------------------------------------- 文档层
+  - name: manuals
+    type: filesystem
+    path: ../data/sample/manuals
+    doc_type: manual
+    acl_groups: [public, service]
+
+  - name: bulletins          # 服务通告：内部资料，只对售后服务组开放
+    type: filesystem
+    path: ../data/sample/bulletins
+    doc_type: bulletin
+    acl_groups: [service]
+
+  - name: qa_archive         # 历史工单
+    type: qa_archive
+    path: ../data/sample/qa_archive/tickets.jsonl
+    acl_groups: [service]
+    resolved_statuses: [resolved, closed]
+    uri_template: "https://crm.example.com/tickets/{ticket_id}"
+
+  - name: teams_support      # Teams 聊天记录提炼出的问答（先运行 `servicekb chat clean`，见 docs/09）
+    type: qa_archive
+    path: ../data/sample/chat/teams_qa.jsonl
+    doc_type: chat
+    acl_groups: [service]
+    resolved_statuses: [resolved]
+    enabled: false           # 生成 teams_qa.jsonl 之后改成 true
+
+  # ---------------------------------------------------------------- SharePoint（示例，默认关闭）
+  # 需要环境变量：SERVICEKB_GRAPH_TENANT_ID / SERVICEKB_GRAPH_CLIENT_ID / SERVICEKB_GRAPH_CLIENT_SECRET
+  - name: sharepoint_kb
+    type: sharepoint
+    drive_id: "b!xxxxxxxxxxxxxxxxxxxxxxxx"
+    folder: "Service KB/Manuals"
+    doc_type: manual
+    acl_groups: [service]
+    enabled: false

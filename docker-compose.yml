@@ -1,0 +1,75 @@
+# 本地 / 单机部署
+#
+#   docker compose up -d db                       # 只起数据库（本地开发最常用）
+#   docker compose up -d                          # 数据库 + API
+#   docker compose run --rm api servicekb ingest  # 导入数据（一次性任务，可以放进定时任务）
+#   docker compose --profile gpu up -d            # 再加上 GPU 模型服务（embedding / rerank / LLM）
+#
+# GPU 规划（对应 48GB + 96GB 两台工作站，见 docs/06_deployment.md）：
+#   48GB 卡：embeddings + reranker（两个 TEI 容器合计 < 10GB 显存，余量可跑 OCR / SigLIP）
+#   96GB 卡：llm（vLLM，30B 级别模型 bf16）
+# 镜像版本请固定到你们验证过的版本，并定期升级。
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: servicekb
+      POSTGRES_PASSWORD: servicekb  # 生产必须改，并用 secrets 管理
+      POSTGRES_DB: servicekb
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U servicekb"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    env_file: [.env]
+    environment:
+      SERVICEKB_STORE_BACKEND: postgres
+      SERVICEKB_DATABASE_URL: postgresql://servicekb:servicekb@db:5432/servicekb
+    depends_on:
+      db: {condition: service_healthy}
+    ports: ["8000:8000"]
+
+  # ------------------------------------------------------------------ GPU 服务（--profile gpu）
+  embeddings:
+    profiles: [gpu]
+    image: ghcr.io/huggingface/text-embeddings-inference:1.6
+    command: ["--model-id", "BAAI/bge-m3", "--max-client-batch-size", "64"]
+    ports: ["8080:80"]
+    volumes: [hf-cache:/data]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["0"], capabilities: [gpu]}]
+
+  reranker:
+    profiles: [gpu]
+    image: ghcr.io/huggingface/text-embeddings-inference:1.6
+    command: ["--model-id", "BAAI/bge-reranker-v2-m3"]
+    ports: ["8081:80"]
+    volumes: [hf-cache:/data]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["0"], capabilities: [gpu]}]
+
+  llm:
+    profiles: [gpu]
+    image: vllm/vllm-openai:v0.8.5
+    # 模型按你们的显存、许可证和效果评估结果选择；这里只是示例
+    command: ["--model", "Qwen/Qwen3-32B", "--max-model-len", "32768", "--gpu-memory-utilization", "0.90"]
+    ports: ["8001:8000"]
+    volumes: [hf-cache:/root/.cache/huggingface]
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["1"], capabilities: [gpu]}]
+
+volumes:
+  pgdata:
+  hf-cache:

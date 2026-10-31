@@ -1,0 +1,78 @@
+# 领域词典：产品型号别名 + 故障码
+# ---------------------------------------------------------------------------
+# ⚠️ 示例数据：ACME Solar 是虚构品牌，型号、故障码、阈值均为虚构，不代表任何真实产品。
+#
+# 这份文件是"对象层"最便宜的起点：把老师傅脑子里的"AS110K 就是 AS-110K-HV"写下来。
+# 业务人员可以直接改这个文件提 PR；改完重新 ingest，所有文档的实体链接会自动刷新。
+#
+# aliases 匹配规则：大小写、空格、连字符、下划线都会被忽略（见 processing/text.normalize_key）
+#   所以 "AS110K" 能匹配 "as-110k"、"AS 110K"、"AS_110K"，不用每种写法都列一遍。
+
+product_models:
+  - name: AS-8K-RS
+    display_name: AS-8K-RS 户用单相逆变器
+    aliases: [AS8K, AS-8K, 8K-RS, AS8KRS]
+    segment: residential
+    rated_power_kw: 8
+  - name: AS-50K
+    display_name: AS-50K 工商业三相逆变器
+    aliases: [AS50K, AS-50]
+    segment: commercial
+    rated_power_kw: 50
+  - name: AS-110K-HV
+    display_name: AS-110K-HV 组串式逆变器（1100V）
+    aliases: [AS110K, AS-110K, AS110KHV, 110K-HV, AS-110KHV]
+    segment: commercial
+    rated_power_kw: 110
+    max_dc_voltage_v: 1100
+  - name: AS-250K-HV
+    display_name: AS-250K-HV 组串式逆变器（1500V）
+    aliases: [AS250K, AS-250K, AS250KHV, 250K-HV]
+    segment: utility
+    rated_power_kw: 250
+    max_dc_voltage_v: 1500
+
+fault_codes:
+  - code: E012
+    name_zh: 电网过压
+    name_en: Grid overvoltage
+    severity: fault
+  - code: E021
+    name_zh: 电网频率异常
+    name_en: Grid frequency out of range
+    severity: fault
+  - code: E037
+    name_zh: 绝缘阻抗低
+    name_en: Low insulation resistance
+    aliases: [绝缘阻抗异常, ISO fault, insulation fault]
+    severity: fault
+    related: [E044]
+  - code: E044
+    name_zh: 漏电流过大
+    name_en: Residual current too high
+    aliases: [漏电流故障, GFCI fault]
+    severity: fault
+    related: [E037]
+  - code: E051
+    name_zh: 风扇故障
+    name_en: Fan fault
+    severity: fault
+  - code: E063
+    name_zh: 机内温度过高
+    name_en: Over-temperature
+    aliases: [过温, over temperature]
+    severity: fault
+    related: [E051]
+  - code: E077
+    name_zh: 直流母线过压
+    name_en: DC bus overvoltage
+    severity: fault
+  - code: W102
+    name_zh: 组串电流不平衡
+    name_en: String current mismatch
+    severity: warning
+  - code: W115
+    name_zh: 通讯异常
+    name_en: Communication lost
+    aliases: [通讯中断, 掉线]
+    severity: warning

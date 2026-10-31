@@ -1,0 +1,18 @@
+part_number,name_zh,name_en,category,applicable_models,status,substituted_by,interchangeable_with,interchange_note,aliases,notes
+310-04521-A,散热风扇组件,Cooling fan assembly,electrical,AS-110K-HV,obsolete,310-04521-B,,,风扇总成,2025-06 起停产，见 SB-2025-014
+310-04521-B,散热风扇 组件(带防尘网),Cooling fan assembly with dust filter,electrical,AS-110K-HV,active,,,,散热风扇组件(带防尘网);新版风扇组件,替代 310-04521-A；2023-01 之前出厂的机器需配合安装支架 730-00014-A
+310-04522-A,外部散热风扇,External cooling fan,electrical,AS-250K-HV,active,,,,,
+220-11008-A,直流开关 1100V,DC switch 1100V,electrical,AS-50K;AS-110K-HV,active,,,,直流隔离开关 1100V,仅限 1100V 系统
+220-11009-A,直流开关 1500V,DC switch 1500V,electrical,AS-250K-HV,active,,,,直流隔离开关 1500V,1500V 系统专用，不可用 220-11008-A 代替
+410-20031-C,主控板,Control board,electrical,AS-110K-HV,obsolete,410-20031-D,410-20031-D,固件需升级至 V2.3.0 及以上,控制板,
+410-20031-D,主控板(新版),Control board rev D,electrical,AS-110K-HV,active,,410-20031-C,固件需升级至 V2.3.0 及以上,控制板(新版),出厂固件 V2.3.1
+410-20077-A,通讯板,Communication board (RS485/WiFi),electrical,AS-8K-RS;AS-50K,active,,,,通信板,
+330-07001-B,绝缘检测板,Insulation monitoring board,electrical,AS-110K-HV,active,,,,绝缘监测板;IMD板,
+520-00310-A,交流防雷模块,AC surge protection device type II,electrical,AS-50K;AS-110K-HV;AS-250K-HV,active,,,,交流浪涌保护器;AC SPD,指示窗变红表示失效
+520-00311-A,直流防雷模块,DC surge protection device,electrical,AS-110K-HV;AS-250K-HV,active,,,,直流浪涌保护器;DC SPD,
+610-00045-A,MC4 光伏连接器,MC4 PV connector,consumable,AS-8K-RS;AS-50K;AS-110K-HV;AS-250K-HV,active,,,,MC4接头;光伏接头,
+610-00046-A,防水接头 M25,Cable gland M25,consumable,AS-50K;AS-110K-HV,active,,,,格兰头 M25,
+730-00012-A,机箱侧盖,Side cover,structural,AS-110K-HV,active,,,,侧板,螺丝扭矩 2.5 N·m
+730-00013-A,安装挂架,Mounting bracket,structural,AS-110K-HV;AS-50K,active,,,,挂板,
+730-00014-A,风扇安装支架,Fan mounting bracket,structural,AS-110K-HV,active,,,,风扇转接支架,用于在 2023-01 之前出厂的机器上安装 310-04521-B
+310-04521-A,风扇总成,Cooling fan assy,electrical,AS-110K-HV,obsolete,310-04521-B,,,,重复录入（数据质量问题示例）

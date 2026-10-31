@@ -1,0 +1,18 @@
+{"id": "q01", "question": "AS-110K-HV 早上报 E037 绝缘阻抗低，中午自动恢复，怎么处理？", "relevant": ["manuals:AS-110K-HV_service_manual_zh.md", "qa_archive:TK-2024-0103", "qa_archive:TK-2024-0157"], "must_include": ["E037"], "answerable": true}
+{"id": "q02", "question": "E051 风扇故障需要换哪个料号？机器是 AS-110K-HV", "relevant": ["bulletins:SB-2025-014_fan_module_change.md", "parts_master:310-04521-B", "qa_archive:TK-2025-0042", "manuals:AS-110K-HV_service_manual_zh.md"], "must_include": ["310-04521-B"], "answerable": true}
+{"id": "q03", "question": "310-04521-A 还能订到吗？", "relevant": ["parts_master:310-04521-A", "parts_master:310-04521-B", "bulletins:SB-2025-014_fan_module_change.md"], "must_include": ["310-04521-B"], "answerable": true}
+{"id": "q04", "question": "AS-250K-HV 的直流开关坏了，应该用哪个料号？", "relevant": ["parts_master:220-11009-A", "qa_archive:TK-2025-0190", "manuals:AS-250K-HV_service_manual_en.md"], "must_include": ["220-11009-A"], "answerable": true}
+{"id": "q05", "question": "After replacing the control board on AS-110K-HV we get E077, why?", "relevant": ["bulletins:SB-2026-003_control_board_firmware.md", "qa_archive:TK-2025-0133"], "must_include": ["V2.3"], "answerable": true}
+{"id": "q06", "question": "AS-8K-RS 换了路由器以后 App 显示 W115 通讯异常", "relevant": ["manuals:AS-8K-RS_user_manual_zh.md", "qa_archive:TK-2025-0150"], "must_include": ["2.4"], "answerable": true}
+{"id": "q07", "question": "AS-250K-HV trips with E063 over-temperature in summer afternoons", "relevant": ["manuals:AS-250K-HV_service_manual_en.md", "qa_archive:TK-2025-0120"], "must_include": ["filter"], "answerable": true}
+{"id": "q08", "question": "组串电流不平衡 W102 可能是什么原因？", "relevant": ["manuals:AS-110K-HV_service_manual_zh.md", "qa_archive:TK-2025-0088"], "must_include": [], "answerable": true}
+{"id": "q09", "question": "正午频繁报 E012 电网过压怎么办", "relevant": ["manuals:AS-110K-HV_service_manual_zh.md", "qa_archive:TK-2025-0201"], "must_include": [], "answerable": true}
+{"id": "q10", "question": "交流防雷模块指示窗变红是什么意思", "relevant": ["parts_master:520-00310-A", "qa_archive:TK-2025-0244"], "must_include": ["520-00310-A"], "answerable": true}
+{"id": "q11", "question": "AS-110K-HV 主控板的料号是多少？", "relevant": ["parts_master:410-20031-D", "parts_master:410-20031-C", "manuals:AS-110K-HV_service_manual_zh.md"], "must_include": ["410-20031-D"], "answerable": true}
+{"id": "q12", "question": "AS-110K-HV 侧盖螺丝扭矩是多少", "relevant": ["manuals:AS-110K-HV_service_manual_zh.md", "qa_archive:TK-2025-0230", "parts_master:730-00012-A"], "must_include": ["2.5"], "answerable": true}
+{"id": "q13", "question": "How to upgrade the firmware of AS-110K-HV without network?", "relevant": ["manuals:AS-110K-HV_service_manual_zh.md", "qa_archive:TK-2026-0045"], "must_include": ["USB"], "answerable": true}
+{"id": "q14", "question": "组串绝缘都正常但还是报 E037，可能是哪个部件坏了？", "relevant": ["qa_archive:TK-2025-0215", "qa_archive:TK-2026-0031", "qa_archive:TK-2026-0012", "manuals:AS-110K-HV_service_manual_zh.md"], "must_include": ["330-07001-B"], "answerable": true}
+{"id": "q15", "question": "逆变器支持接入风力发电机吗？", "relevant": [], "must_include": [], "answerable": false}
+{"id": "q16", "question": "公司年假政策是什么？", "relevant": [], "must_include": [], "answerable": false}
+{"id": "q17", "question": "AS-8K-RS 下雨天报 E044 漏电流过大", "relevant": ["manuals:AS-8K-RS_user_manual_zh.md", "qa_archive:TK-2025-0161"], "must_include": ["E044"], "answerable": true}
+{"id": "q18", "question": "2022 年出厂的 AS-110K-HV 换新风扇还需要什么配件？", "relevant": ["bulletins:SB-2025-014_fan_module_change.md", "parts_master:730-00014-A", "qa_archive:TK-2025-0042"], "must_include": ["730-00014-A"], "answerable": true}

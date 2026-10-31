@@ -1,0 +1,84 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "servicekb"
+version = "0.1.0"
+description = "Industrial-grade RAG framework for after-sales / field-service knowledge bases (manuals, Q&A archives, parts master, chat logs)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "servicekb contributors" }]
+keywords = ["rag", "retrieval-augmented-generation", "pgvector", "knowledge-base", "field-service"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+# 核心依赖：只放"离线也能跑通全链路"所需的轻量包。
+# 重型依赖（torch / sentence-transformers / docling）放在 optional extras 里，按需安装。
+dependencies = [
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "numpy>=1.26",
+  "pyyaml>=6.0",
+  "jieba>=0.42.1",          # 中文分词，用于关键词检索
+  "httpx>=0.27",            # Microsoft Graph / TEI 等 HTTP 调用
+  "typer>=0.12",            # CLI
+  "rich>=13.7",             # CLI 表格输出
+  "psycopg[binary]>=3.1.18",
+  "psycopg-pool>=3.2",
+  "pgvector>=0.2.5",        # psycopg 的 vector 类型适配
+  "pypdf>=4.2",             # PDF 文本抽取（无 OCR）
+  "python-docx>=1.1",
+  "openpyxl>=3.1",
+  "rapidfuzz>=3.9",         # 近似字符串匹配：料号/名称查重
+  "fastapi>=0.111",
+  "uvicorn>=0.30",
+  "openai>=1.30",           # OpenAI 及任何 OpenAI-compatible 服务（vLLM / TEI / Ollama）
+]
+
+[project.optional-dependencies]
+# 本地 GPU 推理：BGE-M3 向量模型 + bge-reranker-v2-m3 重排模型
+local = ["sentence-transformers>=3.0", "torch>=2.2"]
+# 版面分析 / 表格识别 / 扫描件 OCR（重，按需）
+docling = ["docling>=2.0"]
+dev = [
+  "pytest>=8.2",
+  "pytest-cov>=5.0",
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "types-PyYAML",
+]
+
+[project.scripts]
+servicekb = "servicekb.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/servicekb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "postgres: needs a real PostgreSQL+pgvector (set SERVICEKB_TEST_DATABASE_URL)",
+]
+filterwarnings = [
+  "ignore::DeprecationWarning:jieba.*",
+  "ignore:pkg_resources is deprecated:UserWarning",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501", "B008", "SIM905"]  # B008: typer/fastapi 的默认参数写法；SIM905: 停用词表用 split 更易读
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true

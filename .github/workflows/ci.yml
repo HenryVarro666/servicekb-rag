@@ -1,0 +1,35 @@
+# CI：lint → 单元测试 → Postgres 集成测试 → 评估门禁
+# 评估门禁的意义：任何改动（切块参数、prompt、分词词典……）让检索效果变差，PR 直接红灯。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: servicekb
+          POSTGRES_PASSWORD: servicekb
+          POSTGRES_DB: servicekb_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U servicekb" --health-interval 5s --health-retries 10
+    env:
+      SERVICEKB_TEST_DATABASE_URL: postgresql://servicekb:servicekb@localhost:5432/servicekb_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]" fpdf2
+      - run: ruff check src tests
+      - run: pytest --cov=servicekb --cov-report=term-missing
+      - name: Retrieval regression gate (offline embedder)
+        run: servicekb eval --min-hit 0.85 --min-refusal 0.9
