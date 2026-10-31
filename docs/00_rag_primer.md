@@ -36,6 +36,10 @@
 
 ## 2. 一次问答背后发生了什么
 
+![一次问答的内部过程](images/query_flow.zh.svg)
+
+下面的时序图是同一件事的另一种画法：
+
 ```mermaid
 sequenceDiagram
     participant U as 现场工程师

@@ -1,5 +1,7 @@
 # 01 架构总览
 
+![servicekb 总体架构](images/architecture.zh.svg)
+
 ## 1. 分层
 
 ```mermaid
