@@ -6,18 +6,7 @@
 
 ## 1. 全流程
 
-```mermaid
-flowchart LR
-    A[Connector<br/>读取 + 字段映射<br/>+ 质量门槛] --> B[Parser<br/>→ Block 列表]
-    B --> C{内容哈希 +<br/>pipeline 版本<br/>变了吗？}
-    C -->|没变| SKIP[跳过]
-    C -->|变了| D[结构化切块]
-    D --> E[实体链接<br/>型号 / 料号 / 故障码]
-    E --> F[分词<br/>正文 + 标题路径]
-    F --> G[SimHash]
-    G --> H[向量化<br/>复用未变块的向量]
-    H --> I[(原子替换<br/>documents + chunks)]
-```
+![导入 pipeline](images/ingest_pipeline.zh.svg)
 
 运行：`servicekb ingest`（全部数据源）或 `servicekb ingest --only manuals`。
 
@@ -104,6 +93,8 @@ len(answer) < min_answer_chars   → 过滤（filtered_no_answer）
 **怎么调**：先看数据。`servicekb search` 的结果里如果经常看到"答案被切成两半"，加大 `max_tokens` 或 `overlap`；如果一个块里混了好几件事，减小 `max_tokens`。改完必须跑 `servicekb eval` 对比。
 
 ## 6. 增强：实体链接、分词、指纹
+
+![对象层](images/object_layer.zh.svg)
 
 对每个块（`pipeline/ingest.py::build_chunks`）：
 
