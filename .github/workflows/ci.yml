@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -e ".[dev]" fpdf2
+      - run: pip install -e ".[dev]"
       - run: ruff check src tests
       - run: pytest --cov=servicekb --cov-report=term-missing
       - name: Retrieval regression gate (offline embedder)

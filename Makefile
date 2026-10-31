@@ -2,7 +2,7 @@
 .PHONY: install test test-pg lint demo db-up ingest eval serve chat
 
 install:            ## 安装（含开发依赖）
-	pip install -e ".[dev]" fpdf2
+	pip install -e ".[dev]"
 
 test:               ## 单元测试（不需要数据库）
 	pytest
