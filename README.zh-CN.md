@@ -10,6 +10,7 @@
 - ♻️ **工业级数据 pipeline**：增量、幂等、向量复用、故障隔离、安全删除、每次运行可审计
 - 🔐 **权限与合规**：块级 ACL、PII 脱敏、证据不足自动拒答并标记升级
 - 💬 **聊天记录清洗**：Teams 导出 → 线程重建 → 问答抽取 → 人工审核分流（[详细指南](docs/09_chat_log_cleaning.md)）
+- 📷 **拍照识别备件**：现场照片 → SigLIP 外观匹配 + 标签 / 铭牌 OCR → 候选料号（长得像的会提醒）→ 交给知识库回答（[详细指南](docs/10_part_photo_recognition.md)）
 - 📏 **自带评估**：检索 hit@k / MRR / nDCG + 回答关键事实召回 + 拒答准确率，CI 回归门禁
 - 🎓 **为新人而写**：每个模块开头都解释"这一步在 RAG 里是干什么的、为什么这么做"
 
@@ -73,6 +74,8 @@ servicekb search "as110k 早上报 E037"          # 看检索细节：每个结�
 servicekb ask "E051 换哪个料号" --groups public  # 换成外部用户权限：内部服务通告和工单就搜不到了
 servicekb eval                                  # 跑评估集
 servicekb chat clean                            # 清洗示例 Teams 聊天记录
+servicekb photo ask data/sample/photos/site_310-04521-A_label.jpg "怎么更换？"   # 照片 → 料号 → 知识库回答
+servicekb photo eval                            # 拍照识别评估
 servicekb serve                                 # 启动 HTTP API → http://localhost:8000/docs
 pytest                                          # 跑测试
 ```
@@ -111,6 +114,15 @@ pytest                                          # 跑测试
 - 某份 PDF 坏了不影响其他文档，旧版本仍可检索，下次自动重试。
 - 全量数据源"消失"超过一半时拒绝删除——防止网盘没挂上导致知识库被清空。
 
+### 拍照识别备件：视觉 + OCR + 对象层 + 知识库
+
+![拍照识别备件](docs/images/part_photo.zh.svg)
+
+- **先 OCR**：读出料号、序列号、本体印的规格；并把标签区域涂掉再做外观匹配（每台机器的贴纸都不一样，只会干扰）。
+- **视觉**：整图 + 2×2 切块（3000+ 像素的原图里，小零件不会被缩没）→ 图像向量（生产用 SigLIP）→ 参考图库（每个料号一个文件夹）里最像的图。
+- **绝不自信地认错**：长得像的零件（新旧版本、1100V / 1500V 开关）会提醒"请拍铭牌确认"；图库里没有的东西直接说"未识别"，不硬猜。
+- 识别出的料号交给对象层（停产？替代件？）和知识库，回答"这是什么、还能不能订、怎么换"，带引用。
+
 ---
 
 ## 接入 PostgreSQL
@@ -140,6 +152,8 @@ servicekb ask "E037 早上出现中午消失"
 | 向量模型 | `BAAI/bge-m3`（中英混合、1024 维、8192 长度） | 48GB 卡，TEI 容器 | `EMBEDDING_BACKEND=openai` + `EMBEDDING_BASE_URL=http://gpu:8080/v1` + `EMBEDDING_DIM=1024` |
 | 重排模型 | `BAAI/bge-reranker-v2-m3` | 48GB 卡，TEI 容器 | `RERANKER_BACKEND=tei` + `RERANKER_URL=http://gpu:8081` |
 | 大模型 | OpenAI API，或本地 vLLM（96GB 卡可跑 30B 级模型） | 96GB 卡 / 云 | `LLM_BACKEND=openai` + `LLM_MODEL=...`（+ `LLM_BASE_URL` 指向 vLLM）|
+| 图像向量 | `google/siglip-so400m-patch14-384`（1152 维），或已有的图像编码服务 | 48GB 卡 | `IMAGE_EMBEDDING_BACKEND=siglip`（或 `http` + `IMAGE_EMBEDDING_URL`），`pip install -e ".[vision]"` |
+| OCR | RapidOCR（中英文，CPU 即可） | API 服务器 | `OCR_BACKEND=rapidocr`，`pip install -e ".[ocr]"` |
 
 ```bash
 docker compose --profile gpu up -d        # 启动 embeddings / reranker / llm 三个 GPU 服务
@@ -156,7 +170,8 @@ servicekb db reset --yes && servicekb db init && servicekb ingest   # 换了向�
 ```text
 servicekb-rag/
 ├── configs/sources.yaml            # 数据源配置：有哪些数据、在哪、谁能看
-├── data/sample/                    # 虚构示例数据（词典、料号、手册、通告、工单、Teams 导出）
+├── data/sample/                    # 虚构示例数据（词典、料号、手册、通告、工单、Teams 导出、
+│                                   #   part_images/ 参考图库、photos/ 现场照片——都是脚本画的）
 ├── eval/golden_qa.jsonl            # 评估集：问题 + 相关文档 + 必须出现的关键事实
 ├── src/servicekb/
 │   ├── config.py                   # 所有可调参数（环境变量覆盖）
@@ -166,6 +181,7 @@ servicekb-rag/
 │   │   ├── qa_archive.py           #   历史工单（含质量门槛）
 │   │   ├── parts_master.py         #   物料主数据 → 实体 + 关系 + 每料号一条记录
 │   │   ├── dictionary.py           #   领域词典 YAML → 型号 / 故障码实体
+│   │   ├── part_images.py          #   参考图库：每个料号一个文件夹
 │   │   └── sharepoint.py           #   SharePoint（Graph delta 增量 + 限流重试）
 │   ├── parsing/                    # 【解析】各种格式 → 统一的 Block 列表
 │   ├── processing/
@@ -179,7 +195,7 @@ servicekb-rag/
 │   │   ├── base.py                 #   存储接口
 │   │   ├── memory.py               #   内存实现（含标准 BM25，适合对照学习）
 │   │   ├── postgres.py             #   Postgres 实现（HNSW、tsvector、原子替换）
-│   │   └── migrations/001_init.sql #   表结构（每个字段都有注释）
+│   │   └── migrations/             #   001_init.sql 表结构、002_image_embeddings.sql 图像向量表（每个字段都有注释）
 │   ├── pipeline/ingest.py          # 【导入】增量 / 幂等 / 向量复用 / 故障隔离 / 安全删除
 │   ├── retrieval/
 │   │   ├── retriever.py            #   查询分析 + 三路并行召回
@@ -189,11 +205,14 @@ servicekb-rag/
 │   │   ├── prompts.py              #   prompt（带版本号）
 │   │   └── generator.py            #   LLM / 抽取式降级 + 引用校验
 │   ├── chat/                       # 【聊天记录清洗】Teams HTML、线程、名册、问答抽取、分流
+│   ├── vision/                     # 【拍照识别】图片处理、SigLIP / 手工特征 / HTTP 图像向量、OCR、
+│   │                               #   识别融合、拍照识别评估
 │   ├── service.py                  # 应用容器：ingest / search / ask（证据门槛、拒答、日志）
 │   ├── evaluation.py               # 评估指标与报告
 │   ├── api.py                      # FastAPI：/v1/ask /v1/search /v1/feedback /healthz /readyz
 │   └── cli.py                      # 命令行
-├── tests/                          # 58 个测试，含 Postgres 集成测试
+├── scripts/make_sample_part_images.py  # 生成虚构零件图片和现场照片
+├── tests/                          # 77 个测试，含 Postgres 集成测试
 ├── docs/                           # 详细文档（见下文导航）+ 示意图（docs/images，由 make_diagrams.py 生成）
 ├── Dockerfile / docker-compose.yml # 部署（含 GPU profile：TEI ×2 + vLLM）
 └── .github/workflows/ci.yml        # lint → 测试 → Postgres 集成测试 → 评估门禁
@@ -240,7 +259,16 @@ servicekb-rag/
 
 唯一失败的 q13（"How to upgrade the firmware of AS-110K-HV without network?"）是**跨语言**问题：英文提问、答案在中文手册里。哈希向量不懂跨语言，换成 bge-m3 即可解决。**这个失败用例被刻意保留在评估集里**，用来说明为什么生产必须用真正的语义向量模型。
 
-> 示例数据很小，这些数字只证明"链路是通的、逻辑是对的"，**不代表真实数据上的效果**。上线前必须用真实工单构建评估集（[docs/05_evaluation.md](docs/05_evaluation.md)）。
+拍照识别（`servicekb photo eval`，23 张：11 个料号 × 有 / 无标签 + 1 个图库外物体；手工图像特征）：
+
+| 模式 | top1 | top3 | 图库外拒识 | **自信答错** |
+| --- | --- | --- | --- | --- |
+| 视觉 + RapidOCR（真实 OCR） | 1.000 | 1.000 | 1.000 | **0.000** |
+| 只看视觉 | 0.773 | 0.818 | 1.000 | **0.000** |
+
+"自信答错"——给出了料号、没有任何"请确认"提醒、而且是错的——是最重要的指标：它意味着发错货、装错件。CI 门禁要求它必须为 0。
+
+> 示例数据很小（零件照片还是脚本画的），这些数字只证明"链路是通的、逻辑是对的"，**不代表真实数据上的效果**。上线前必须用真实工单、真实现场照片构建评估集（[docs/05_evaluation.md](docs/05_evaluation.md)、[docs/10](docs/10_part_photo_recognition.md)）。
 
 ---
 
@@ -258,6 +286,8 @@ servicekb-rag/
 - 实体路没命中 → 别名没登记，或料号正则 `SERVICEKB_PART_NUMBER_PATTERN` 不匹配你们的格式
 
 完整的"症状 → 调哪个参数"表见 [docs/04_retrieval_generation.md](docs/04_retrieval_generation.md#11-调参指南)。
+
+**给某个料号添加参考照片**：把图片放进 `data/sample/part_images/<料号>/`（正面、侧面、标签特写、装机状态），运行 `servicekb ingest --only part_images`，没变的图会自动跳过。
 
 **清洗 Teams 聊天记录**：`servicekb chat clean`，详见 [docs/09_chat_log_cleaning.md](docs/09_chat_log_cleaning.md)。
 
@@ -283,6 +313,7 @@ servicekb-rag/
 | 8 | [07 开源项目调研](docs/07_repo_survey.md) | 想知道设计决策的来源 |
 | 9 | [08 不足与路线图](docs/08_limitations_roadmap.md) | 接下来做什么 |
 | 10 | [09 聊天记录清洗](docs/09_chat_log_cleaning.md) | 要处理 Teams / Slack / 企业微信记录 |
+| 11 | [10 拍照识别备件](docs/10_part_photo_recognition.md) | SigLIP、OCR、参考图库、长得像的零件、阈值校准 |
 | — | [术语表](docs/glossary.md) | 随时查 |
 
 ---
@@ -293,7 +324,7 @@ servicekb-rag/
 
 1. **Postgres 关键词检索不是真 BM25**（`ts_rank` 没有 IDF）→ 计划：BGE-M3 稀疏向量（pgvector `sparsevec`）或 ParadeDB `pg_search`
 2. **PDF 解析只支持文本层**，扫描件、复杂表格要靠 docling / MinerU（已留接口）
-3. **没有图片能力**：现场照片、铭牌、故障屏幕截图还用不上 → 与拍照识别备件（OCR + 图像向量）打通
+3. **拍照识别还是骨架**：链路（OCR + 外观匹配 + 融合 + 知识库）已跑通，但真实 SigLIP 还没在真实现场照片上验证过；还没有目标检测和条码识别（[docs/10](docs/10_part_photo_recognition.md#12-当前不足)）
 4. **结构化问题不适合 RAG**（"某型号去年 E037 报了多少次"）→ 需要 Text-to-SQL 路由
 5. **离线模式的拒答是启发式**，生产必须开 reranker 并在真实数据上校准阈值
 6. **导入是同步单进程**，大规模时需要任务队列（按页拆分 PDF、重试、进度）

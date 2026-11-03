@@ -28,7 +28,8 @@ def pg_kb():
     st = PostgresStore(DSN)
     st.reset()
     st.close()
-    kb = ServiceKB(Settings(store_backend="postgres", database_url=DSN, sources_file=SOURCES, _env_file=None))
+    kb = ServiceKB(Settings(store_backend="postgres", database_url=DSN, sources_file=SOURCES, ocr_backend="metadata",
+                            _env_file=None))
     kb.ingest(SOURCES)
     yield kb
     kb.close()
@@ -65,3 +66,21 @@ def test_tsvector_literal_roundtrip(pg_kb):
     with pg_kb.store.pool.connection() as conn:
         assert conn.execute("SELECT %s::tsvector @@ %s::tsquery", (lit, build_tsquery_literal(["310-04521-b"]))).fetchone()[0]
         assert conn.execute("SELECT %s::tsvector @@ %s::tsquery", (lit, build_tsquery_literal(["o'neil"]))).fetchone()[0]
+
+
+def test_photo_identification_on_postgres(pg_kb):
+    from pathlib import Path
+
+    photos = Path(__file__).resolve().parents[1] / "data" / "sample" / "photos"
+    assert pg_kb.store.stats()["images"] == 22
+    res = pg_kb.identify_photo(photos / "site_220-11009-A_label.jpg")
+    assert res.identified and res.top.part_number == "220-11009-A" and res.top.ocr_confirmed
+    res = pg_kb.identify_photo(photos / "site_unknown_helmet.jpg")
+    assert not res.identified
+    [rep] = pg_kb.ingest(SOURCES, only=["part_images"])
+    assert (rep.images_indexed, rep.images_unchanged) == (0, 22)
+
+
+def test_refuses_mismatched_image_model(pg_kb):
+    with pytest.raises(IndexMismatchError):
+        pg_kb.store.init(pg_kb.embedder.model_id, pg_kb.embedder.dim, "siglip:other:1152", 1152)

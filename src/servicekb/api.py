@@ -15,7 +15,7 @@ import secrets
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from servicekb.config import Settings, get_settings
@@ -65,6 +65,33 @@ class SearchHit(BaseModel):
     section: str
     text: str
     duplicates: list[str]
+
+
+class PartCandidateOut(BaseModel):
+    part_number: str
+    name: str
+    status: str
+    score: float
+    visual_score: float | None
+    ocr_confirmed: bool
+    evidence: list[str]
+
+
+class IdentifyResponse(BaseModel):
+    identified: bool
+    candidates: list[PartCandidateOut]
+    lookalikes: list[str]
+    warnings: list[str]
+    facts: list[str]
+    ocr_text: str
+    serial_number: str | None
+    manufacture_date: str | None
+    timings_ms: dict[str, float]
+
+
+class PhotoAskResponse(BaseModel):
+    identification: IdentifyResponse
+    answer: AskResponse
 
 
 class FeedbackRequest(BaseModel):
@@ -143,6 +170,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       text=sc.chunk.text, duplicates=sc.duplicates)
             for i, sc in enumerate(r.results, 1)
         ]
+
+    max_upload = 15 * 1024 * 1024  # 15 MB：手机原图一般 3~8 MB
+
+    async def read_upload(image: UploadFile) -> bytes:
+        data = await image.read(max_upload + 1)
+        if len(data) > max_upload:
+            raise HTTPException(status_code=413, detail="image too large (max 15 MB)")
+        if not data:
+            raise HTTPException(status_code=422, detail="empty file")
+        return data
+
+    def to_identify_response(res: Any) -> IdentifyResponse:
+        return IdentifyResponse(
+            identified=res.identified, lookalikes=[x.split(":", 1)[1] for x in res.lookalikes],
+            warnings=res.warnings, facts=res.facts, ocr_text=res.ocr_text, serial_number=res.serial_number,
+            manufacture_date=res.manufacture_date, timings_ms=res.timings_ms,
+            candidates=[PartCandidateOut(part_number=c.part_number, name=c.name, status=c.status, score=c.score,
+                                         visual_score=c.visual_score, ocr_confirmed=c.ocr_confirmed,
+                                         evidence=c.evidence) for c in res.candidates],
+        )
+
+    def to_ask_response(r: Any) -> AskResponse:
+        return AskResponse(
+            query_id=r.query_id, answer=r.answer, facts=r.facts, escalate=r.escalate, reason=r.reason,
+            model=r.model, timings_ms=r.timings_ms,
+            citations=[CitationOut(index=c.index, doc_ref=c.doc_ref, title=c.title, uri=c.uri,
+                                   section=" > ".join(c.heading_path[1:]), page=c.page, snippet=c.snippet)
+                       for c in r.citations],
+        )
+
+    @app.post("/v1/photo/identify", response_model=IdentifyResponse, dependencies=[Depends(auth)])
+    async def photo_identify(image: UploadFile = File(...), groups: list[str] = Depends(user_groups),
+                             k: ServiceKB = Depends(kb)) -> IdentifyResponse:
+        """上传现场照片，返回候选料号、证据和"长得像"提醒。"""
+        data = await read_upload(image)
+        try:
+            res = k.identify_photo(data, groups)
+        except OSError as e:  # PIL 打不开：不是图片 / 文件损坏
+            raise HTTPException(status_code=422, detail=f"cannot read image: {e}") from e
+        return to_identify_response(res)
+
+    @app.post("/v1/photo/ask", response_model=PhotoAskResponse, dependencies=[Depends(auth)])
+    async def photo_ask(image: UploadFile = File(...), question: str = Form(""),
+                        groups: list[str] = Depends(user_groups), k: ServiceKB = Depends(kb)) -> PhotoAskResponse:
+        """上传照片 + 问题：先识别零件，再用知识库回答。"""
+        data = await read_upload(image)
+        try:
+            ident, r = k.ask_with_photo(data, question or None, groups)
+        except OSError as e:
+            raise HTTPException(status_code=422, detail=f"cannot read image: {e}") from e
+        return PhotoAskResponse(identification=to_identify_response(ident), answer=to_ask_response(r))
 
     @app.post("/v1/feedback", dependencies=[Depends(auth)])
     def feedback(req: FeedbackRequest, k: ServiceKB = Depends(kb)) -> dict[str, bool]:

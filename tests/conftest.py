@@ -14,6 +14,8 @@ setup_logging("WARNING")
 
 
 def memory_settings(**kw) -> Settings:
+    # OCR 固定用测试替身：本机装没装 RapidOCR，测试结果都一样（RapidOCR 有单独的测试）
+    kw.setdefault("ocr_backend", "metadata")
     return Settings(store_backend="memory", sources_file=SOURCES, _env_file=None, **kw)
 
 

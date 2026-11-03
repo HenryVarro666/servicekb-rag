@@ -48,10 +48,11 @@ class RetrievalResult:
     timings_ms: dict[str, float] = field(default_factory=dict)
 
 
-def analyze_query(question: str, linker: EntityLinker) -> QueryAnalysis:
+def analyze_query(question: str, linker: EntityLinker, extra_entities: list[str] | None = None) -> QueryAnalysis:
+    """``extra_entities``：问题文字之外已知的对象（例如拍照识别出的料号），和"问题里直接提到的"同等对待。"""
     q = normalize_text(question)
     mentions = linker.extract(q)
-    direct = [m.entity_id for m in mentions]
+    direct = list(dict.fromkeys([m.entity_id for m in mentions] + list(extra_entities or [])))
     expanded = linker.expand(direct)
     weights: dict[str, float] = {}
     for eid in expanded:
@@ -86,10 +87,11 @@ class HybridRetriever:
         self.near_dup_hamming = near_dup_hamming
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="retrieve")
 
-    def retrieve(self, question: str, filters: SearchFilters, top_k: int = 6) -> RetrievalResult:
+    def retrieve(self, question: str, filters: SearchFilters, top_k: int = 6,
+                 extra_entities: list[str] | None = None) -> RetrievalResult:
         timings: dict[str, float] = {}
         t = time.perf_counter()
-        qa = analyze_query(question, self.linker)
+        qa = analyze_query(question, self.linker, extra_entities)
         qvec = self.embedder.embed_query(qa.question)
         timings["analyze_embed"] = (time.perf_counter() - t) * 1000
 

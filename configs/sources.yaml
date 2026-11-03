@@ -20,6 +20,11 @@ sources:
     path: ../data/sample/parts/parts_master.csv
     acl_groups: [public, service]
 
+  - name: part_images        # 参考图库：每个料号一个文件夹（拍照识别备件用，见 docs/10）
+    type: part_images
+    path: ../data/sample/part_images
+    acl_groups: [public, service]
+
   # ---------------------------------------------------------------- 文档层
   - name: manuals
     type: filesystem

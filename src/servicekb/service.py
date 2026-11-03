@@ -35,6 +35,7 @@ from servicekb.processing.text import tokenize
 from servicekb.retrieval.rerank import build_reranker
 from servicekb.retrieval.retriever import HybridRetriever, RetrievalResult
 from servicekb.store import build_store
+from servicekb.vision.embedders import build_image_embedder
 
 log = get_logger(__name__)
 
@@ -70,16 +71,18 @@ class ServiceKB:
         s = self.settings = settings or get_settings()
         self.store = build_store(s)
         self.embedder = build_embedder(s)
-        self.store.init(self.embedder.model_id, self.embedder.dim)
+        self.image_embedder = build_image_embedder(s)
+        self.store.init(self.embedder.model_id, self.embedder.dim, self.image_embedder.model_id, self.image_embedder.dim)
         self.linker = EntityLinker(part_number_pattern=s.part_number_pattern, fault_code_pattern=s.fault_code_pattern)
         self.reranker = build_reranker(s)
         self.generator = build_generator(s)
         self.pipeline = IngestionPipeline(
             self.store, self.embedder, self.linker,
             ChunkingConfig(s.chunk_max_tokens, s.chunk_overlap_tokens, s.chunk_min_tokens),
-            max_delete_ratio=s.max_delete_ratio,
+            max_delete_ratio=s.max_delete_ratio, image_embedder=self.image_embedder,
         )
         self.pipeline.reload_linker()
+        self._identifier = None  # 拍照识别：第一次用到时才加载 OCR 模型
         self.retriever = HybridRetriever(
             self.store, self.embedder, self.linker, self.reranker,
             top_k_dense=s.top_k_dense, top_k_keyword=s.top_k_keyword, top_k_entity=s.top_k_entity,
@@ -122,9 +125,10 @@ class ServiceKB:
         doc_types: list[str] | None = None,
         product_models: list[str] | None = None,
         top_k: int | None = None,
+        extra_entities: list[str] | None = None,
     ) -> RetrievalResult:
         filters = self._filters(user_groups, doc_types, product_models)
-        return self.retriever.retrieve(question, filters, top_k or self.settings.final_top_k)
+        return self.retriever.retrieve(question, filters, top_k or self.settings.final_top_k, extra_entities)
 
     # ------------------------------------------------------------------ 问答
     def _evidence_ok(self, r: RetrievalResult) -> tuple[bool, str]:
@@ -162,11 +166,14 @@ class ServiceKB:
         doc_types: list[str] | None = None,
         product_models: list[str] | None = None,
         log_query: bool = True,
+        extra_entities: list[str] | None = None,
+        extra_facts: list[str] | None = None,
     ) -> AnswerResult:
+        """``extra_entities`` / ``extra_facts``：问题文字之外的已知信息（例如拍照识别的结果），一起参与检索和生成。"""
         t0 = time.perf_counter()
         query_id = str(uuid.uuid4())
         groups = list(user_groups or self.settings.default_user_groups)
-        r = self.search(question, groups, doc_types, product_models)
+        r = self.search(question, groups, doc_types, product_models, extra_entities=extra_entities)
         timings = dict(r.timings_ms)
         contexts = self._drop_weak_tail(r.results)
         # 结构化事实：① 问题里提到的料号（含替代件）；② 证据里提到的**停产 / 限制使用**料号。
@@ -175,6 +182,7 @@ class ServiceKB:
         evidence_parts = [e for c in contexts for e in c.chunk.entity_ids
                           if e.startswith("part:") and e not in r.analysis.expanded_ids]
         facts += self.linker.facts_for(evidence_parts, only_inactive=True)
+        facts = list(dict.fromkeys([*(extra_facts or []), *facts]))
 
         ok, reason = self._evidence_ok(r)
         if not ok:
@@ -202,8 +210,40 @@ class ServiceKB:
             facts=facts,
         )
         if log_query:
-            self._log(result, groups, {"doc_types": doc_types, "product_models": product_models})
+            log_filters: dict[str, Any] = {"doc_types": doc_types, "product_models": product_models}
+            if extra_entities:
+                log_filters["hint_entities"] = extra_entities
+            self._log(result, groups, log_filters)
         return result
+
+    # ------------------------------------------------------------------ 拍照识别
+    @property
+    def identifier(self):  # noqa: ANN201  延迟导入，避免不用图片功能时加载 OCR
+        if self._identifier is None:
+            from servicekb.vision.identify import PartIdentifier
+            from servicekb.vision.ocr import build_ocr
+
+            s = self.settings
+            self._identifier = PartIdentifier(
+                self.store, self.image_embedder, build_ocr(s.ocr_backend), self.linker,
+                tile_grid=s.image_tile_grid, tile_min_side=s.image_tile_min_side, top_k_refs=s.image_top_k_refs,
+                min_visual_score=s.photo_min_visual_score, lookalike_margin=s.photo_lookalike_margin,
+                serial_pattern=s.serial_number_pattern,
+            )
+        return self._identifier
+
+    def identify_photo(self, image: Any, user_groups: list[str] | None = None, top_k: int = 5):  # noqa: ANN201
+        return self.identifier.identify(image, list(user_groups or self.settings.default_user_groups), top_k)
+
+    def ask_with_photo(self, image: Any, question: str | None = None, user_groups: list[str] | None = None,
+                       log_query: bool = True) -> tuple[Any, AnswerResult]:
+        """照片 + （可选）问题 → 先识别零件，再把识别结果作为已知对象交给知识库回答。"""
+        groups = list(user_groups or self.settings.default_user_groups)
+        ident = self.identify_photo(image, groups)
+        q = (question or "").strip() or "这是什么零件？现在的状态是什么，怎么更换？"
+        facts = [f"照片识别：{w}" for w in ident.warnings] + ident.facts
+        answer = self.ask(q, groups, log_query=log_query, extra_entities=ident.hint_entities(), extra_facts=facts)
+        return ident, answer
 
     def _log(self, r: AnswerResult, groups: list[str], filters: dict[str, Any]) -> None:
         try:

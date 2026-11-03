@@ -10,6 +10,7 @@
 - ♻️ **Production-grade ingestion**: incremental, idempotent, embedding reuse, fault isolation, safe deletes, every run auditable.
 - 🔐 **Access & compliance**: chunk-level ACLs, PII redaction, automatic refusal + escalation when evidence is insufficient.
 - 💬 **Chat-log cleaning**: Teams export → thread reconstruction → Q&A extraction → human-review routing ([guide](docs/09_chat_log_cleaning.md), Chinese).
+- 📷 **Part photo recognition**: site photo → SigLIP visual match + OCR of labels / nameplates → candidate part numbers with look-alike warnings → answered by the knowledge base ([guide](docs/10_part_photo_recognition.md), Chinese).
 - 📏 **Built-in evaluation**: retrieval hit@k / MRR / nDCG + key-fact recall + refusal accuracy, wired into CI as a regression gate.
 - 🎓 **Written for newcomers**: every module opens with an explanation of what the step does in a RAG system and why.
 
@@ -76,6 +77,8 @@ servicekb search "as110k 早上报 E037"          # retrieval debug view: rank o
 servicekb ask "E051 换哪个料号" --groups public  # as an external user: internal bulletins/tickets are invisible
 servicekb eval                                  # run the evaluation set
 servicekb chat clean                            # clean the sample Teams export
+servicekb photo ask data/sample/photos/site_310-04521-A_label.jpg "怎么更换？"   # photo → part → KB answer
+servicekb photo eval                            # photo-recognition evaluation
 servicekb serve                                 # HTTP API → http://localhost:8000/docs
 pytest                                          # tests
 ```
@@ -114,6 +117,15 @@ Typical field data: the same model is spelled five different ways, the same part
 - A broken PDF doesn't affect other documents; its previous version stays searchable and it is retried on the next run.
 - If more than half of a full-snapshot source "disappears", deletion is refused — so an unmounted network drive can't wipe the knowledge base.
 
+### Part photo recognition: vision + OCR + object layer + KB
+
+![Part photo recognition](docs/images/part_photo.en.svg)
+
+- **OCR runs first**: it reads part numbers, serial numbers and printed specs, and its label boxes are painted out before visual matching (stickers differ on every unit and mislead image similarity).
+- **Vision**: whole image + 2×2 tiles (so small parts in 3000+ px photos survive downscaling) → image embeddings (SigLIP in production) → nearest reference images, one folder per part number.
+- **Never confidently wrong**: look-alike parts (old/new revisions, 1100 V vs 1500 V switches) trigger "photograph the label"; objects not in the library are reported as unknown instead of guessed.
+- The identified part feeds the object layer (obsolete? substitute?) and the knowledge base, so the answer covers "which part, can I still order it, how to replace it" with citations.
+
 ---
 
 ## Using PostgreSQL
@@ -143,6 +155,8 @@ The offline "hashing embedder" has **no semantic understanding** (for example, a
 | Embeddings | `BAAI/bge-m3` (multilingual zh/en, 1024-d, 8192 tokens) | 48 GB GPU, TEI container | `EMBEDDING_BACKEND=openai` + `EMBEDDING_BASE_URL=http://gpu:8080/v1` + `EMBEDDING_DIM=1024` |
 | Reranker | `BAAI/bge-reranker-v2-m3` | 48 GB GPU, TEI container | `RERANKER_BACKEND=tei` + `RERANKER_URL=http://gpu:8081` |
 | LLM | OpenAI API, or local vLLM (a 96 GB GPU fits ~30B-class models) | 96 GB GPU / cloud | `LLM_BACKEND=openai` + `LLM_MODEL=...` (+ `LLM_BASE_URL` pointing at vLLM) |
+| Image embeddings | `google/siglip-so400m-patch14-384` (1152-d), or an existing encoder service | 48 GB GPU | `IMAGE_EMBEDDING_BACKEND=siglip` (or `http` + `IMAGE_EMBEDDING_URL`), `pip install -e ".[vision]"` |
+| OCR | RapidOCR (Chinese + English, CPU) | API server | `OCR_BACKEND=rapidocr`, `pip install -e ".[ocr]"` |
 
 ```bash
 docker compose --profile gpu up -d        # embeddings / reranker / llm GPU services
@@ -159,7 +173,8 @@ All settings carry the `SERVICEKB_` prefix; the full list is in [`src/servicekb/
 ```text
 servicekb-rag/
 ├── configs/sources.yaml            # data sources: what data, where, who may see it
-├── data/sample/                    # fictional sample data (dictionary, parts, manuals, bulletins, tickets, Teams export)
+├── data/sample/                    # fictional sample data (dictionary, parts, manuals, bulletins, tickets, Teams export,
+│                                   #   part_images/ reference library, photos/ site photos — all drawn by a script)
 ├── eval/golden_qa.jsonl            # evaluation set: question + relevant docs + must-include facts
 ├── src/servicekb/
 │   ├── config.py                   # every tunable (overridable via env vars)
@@ -169,6 +184,7 @@ servicekb-rag/
 │   │   ├── qa_archive.py           #   ticket archive (with a quality gate)
 │   │   ├── parts_master.py         #   parts master → entities + relations + one record per part
 │   │   ├── dictionary.py           #   domain dictionary YAML → model / fault-code entities
+│   │   ├── part_images.py          #   reference image library: one folder per part number
 │   │   └── sharepoint.py           #   SharePoint (Graph delta sync + throttling retries)
 │   ├── parsing/                    # [parse] every format → one unified list of Blocks
 │   ├── processing/
@@ -182,7 +198,7 @@ servicekb-rag/
 │   │   ├── base.py                 #   storage interface
 │   │   ├── memory.py               #   in-memory store (includes textbook BM25 — good for learning)
 │   │   ├── postgres.py             #   Postgres store (HNSW, tsvector, atomic replace)
-│   │   └── migrations/001_init.sql #   schema (every column commented)
+│   │   └── migrations/             #   001_init.sql schema, 002_image_embeddings.sql (every column commented)
 │   ├── pipeline/ingest.py          # [ingest] incremental / idempotent / embedding reuse / fault isolation / safe deletes
 │   ├── retrieval/
 │   │   ├── retriever.py            #   query analysis + three lanes in parallel
@@ -192,11 +208,14 @@ servicekb-rag/
 │   │   ├── prompts.py              #   prompts (versioned)
 │   │   └── generator.py            #   LLM / extractive fallback + citation validation
 │   ├── chat/                       # [chat cleaning] Teams HTML, threads, roster, Q&A extraction, routing
+│   ├── vision/                     # [part photos] image utils, SigLIP / handcrafted / HTTP embedders, OCR,
+│   │                               #   identification & fusion, photo evaluation
 │   ├── service.py                  # app container: ingest / search / ask (evidence gate, refusal, logging)
 │   ├── evaluation.py               # metrics & reports
 │   ├── api.py                      # FastAPI: /v1/ask /v1/search /v1/feedback /healthz /readyz
 │   └── cli.py                      # command line
-├── tests/                          # 58 tests, including Postgres integration tests
+├── scripts/make_sample_part_images.py  # draws the fictional part images and site photos
+├── tests/                          # 77 tests, including Postgres integration tests
 ├── docs/                           # in-depth docs (Chinese) + diagrams (docs/images, generated by make_diagrams.py)
 ├── Dockerfile / docker-compose.yml # deployment (GPU profile: 2× TEI + vLLM)
 └── .github/workflows/ci.yml        # lint → tests → Postgres integration → eval gate
@@ -243,7 +262,16 @@ The two backends differ in keyword scoring: the in-memory store implements textb
 
 The one retrieval miss, q13 ("How to upgrade the firmware of AS-110K-HV without network?"), is **cross-lingual**: English question, answer in a Chinese manual. The hashing embedder can't bridge languages; bge-m3 can. **This failing case is deliberately kept in the evaluation set** to show why production needs a real multilingual embedding model.
 
-> The sample data is tiny; these numbers only show that the pipeline works and the logic is correct — **not** how it performs on real data. Build an evaluation set from real tickets before going live ([docs/05_evaluation.md](docs/05_evaluation.md)).
+Part photo recognition (`servicekb photo eval`, 23 photos: 11 parts × with/without label + 1 object not in the library; handcrafted image features):
+
+| Mode | top-1 | top-3 | Unknown rejected | **Confident & wrong** |
+| --- | --- | --- | --- | --- |
+| Vision + RapidOCR (real OCR) | 1.000 | 1.000 | 1.000 | **0.000** |
+| Vision only | 0.773 | 0.818 | 1.000 | **0.000** |
+
+"Confident & wrong" — a part number returned with no "please confirm" warning, and wrong — is the metric that matters most: it is what ships the wrong spare part. It's a CI gate (must be 0).
+
+> The sample data is tiny (and the part photos are drawn by a script); these numbers only show that the pipeline works and the logic is correct — **not** how it performs on real data. Build evaluation sets from real tickets and real site photos before going live ([docs/05_evaluation.md](docs/05_evaluation.md), [docs/10](docs/10_part_photo_recognition.md)).
 
 ---
 
@@ -261,6 +289,8 @@ The one retrieval miss, q13 ("How to upgrade the firmware of AS-110K-HV without 
 - entity lane misses → alias not registered, or `SERVICEKB_PART_NUMBER_PATTERN` doesn't match your part-number format
 
 The full "symptom → which knob" table: [docs/04_retrieval_generation.md](docs/04_retrieval_generation.md#11-调参指南).
+
+**Add reference photos for a part**: drop images into `data/sample/part_images/<part number>/` (front, side, label close-up, installed view) and run `servicekb ingest --only part_images`. Unchanged images are skipped.
 
 **Clean Teams chat logs**: `servicekb chat clean` — see [docs/09_chat_log_cleaning.md](docs/09_chat_log_cleaning.md).
 
@@ -288,6 +318,7 @@ The docs are in Chinese; titles translated here.
 | 8 | [07 Open-source survey](docs/07_repo_survey.md) | Where the design decisions come from |
 | 9 | [08 Limitations & roadmap](docs/08_limitations_roadmap.md) | What to build next |
 | 10 | [09 Chat-log cleaning](docs/09_chat_log_cleaning.md) | Teams / Slack / WeCom exports |
+| 11 | [10 Part photo recognition](docs/10_part_photo_recognition.md) | SigLIP, OCR, reference library, look-alikes, calibration |
 | — | [Glossary](docs/glossary.md) | Look things up |
 
 ---
@@ -298,7 +329,7 @@ This version is a **skeleton ready for a pilot**, not the finish line. The most 
 
 1. **Postgres keyword search isn't true BM25** (`ts_rank` has no IDF) → BGE-M3 sparse vectors (pgvector `sparsevec`) or ParadeDB `pg_search`
 2. **PDF parsing reads the text layer only**; scans and complex tables need docling / MinerU (hook already in place)
-3. **No image capability**: site photos, nameplates and screen captures aren't used yet → connect to photo-based part recognition (OCR + image embeddings)
+3. **Photo recognition is a skeleton**: the pipeline (OCR + visual match + fusion + KB) works, but real SigLIP hasn't been validated on real site photos; no object detector or barcode reading yet ([docs/10](docs/10_part_photo_recognition.md#12-当前不足))
 4. **Statistical questions don't fit RAG** ("how many E037 alarms did this model have last year?") → Text-to-SQL routing
 5. **Refusal in offline mode is heuristic**; production must enable the reranker and calibrate its threshold on real data
 6. **Ingestion is synchronous and single-process**; at scale it needs a job queue (page-range PDF tasks, retries, progress)

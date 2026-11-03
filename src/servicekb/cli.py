@@ -33,9 +33,11 @@ app = typer.Typer(add_completion=False, help="servicekb：面向售后 / 现场�
 db_app = typer.Typer(help="数据库管理")
 audit_app = typer.Typer(help="数据质量审计")
 chat_app = typer.Typer(help="聊天记录（Teams）清洗")
+photo_app = typer.Typer(help="拍照识别备件（SigLIP / OCR），见 docs/10")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
 app.add_typer(chat_app, name="chat")
+app.add_typer(photo_app, name="photo")
 console = Console()
 
 
@@ -314,6 +316,80 @@ def chat_export(
                          os.environ["SERVICEKB_GRAPH_CLIENT_SECRET"])
     n = TeamsChannelExporter(client).export(team_id, channel_id, out)
     console.print(f"[green]导出 {n} 条消息 → {out}[/green]")
+
+
+# --------------------------------------------------------------------------- 拍照识别
+
+
+def _print_identification(res) -> None:  # noqa: ANN001
+    t = Table("#", "料号", "名称", "状态", "外观相似度", "标签确认", "参考图")
+    for i, c in enumerate(res.candidates, 1):
+        t.add_row(str(i), c.part_number, c.name, c.status,
+                  f"{c.visual_score:.3f}" if c.visual_score is not None else "-",
+                  "✅" if c.ocr_confirmed else "", Path(c.best_reference or "").name)
+    console.print(t)
+    verdict = f"[green]识别为 {res.top.part_number}[/green]" if res.top else "[yellow]未能可靠识别[/yellow]"
+    console.print(verdict)
+    if res.ocr_text:
+        console.print(f"[dim]OCR：{res.ocr_text!r}[/dim]")
+    if res.manufacture_date:
+        console.print(f"序列号 {res.serial_number} → 出厂年月 {res.manufacture_date}")
+    for w in res.warnings:
+        console.print(f"[yellow]⚠ {w}[/yellow]")
+    for f in res.facts:
+        console.print(f"[cyan]• {f}[/cyan]")
+    console.print(f"[dim]{res.timings_ms}[/dim]")
+
+
+@photo_app.command("identify")
+def photo_identify(
+    image: Path,
+    groups: str | None = typer.Option(None, help="用户组，逗号分隔"),
+    top_k: int = typer.Option(5),
+) -> None:
+    """识别照片里的零件：候选料号 + 证据 + 长得像提醒。"""
+    kb = _kb()
+    _print_identification(kb.identify_photo(image, _groups(groups), top_k))
+
+
+@photo_app.command("ask")
+def photo_ask(
+    image: Path,
+    question: str = typer.Argument("", help="可选，例如“怎么更换？”；不填默认问“这是什么零件、怎么更换”"),
+    groups: str | None = typer.Option(None, help="用户组，逗号分隔"),
+) -> None:
+    """照片 + 问题 → 先识别零件，再用知识库回答（带引用）。"""
+    kb = _kb()
+    ident, r = kb.ask_with_photo(image, question or None, _groups(groups))
+    _print_identification(ident)
+    console.rule("知识库回答")
+    console.print(r.answer)
+    for c in r.citations:
+        console.print(f"  [{c.index}] {c.doc_ref}  {' > '.join(c.heading_path[1:])}", style="dim")
+    if r.escalate:
+        console.print(f"[yellow]⚠ 已标记升级：{r.reason}[/yellow]")
+
+
+@photo_app.command("eval")
+def photo_eval(
+    labels: Path = typer.Option(Path("data/sample/photos/labels.jsonl")),
+    out: Path = typer.Option(Path("eval/reports")),
+    no_ocr: bool = typer.Option(False, "--no-ocr", help="关掉 OCR，只看视觉的效果"),
+    min_top1: float = typer.Option(0.0, help="top1 低于该值返回非零退出码（CI 门禁）"),
+    max_confident_wrong: float = typer.Option(1.0, help="自信答错率高于该值返回非零退出码"),
+) -> None:
+    """拍照识别评估：top1 / top3 / 未识别拒识 / 自信答错率。"""
+    from servicekb.vision.evaluate import run_photo_eval, save_photo_report
+
+    kb = _kb()
+    rep = run_photo_eval(kb, labels, use_ocr=not no_ocr)
+    md = save_photo_report(rep, out)
+    console.print(rep.to_markdown())
+    console.print(f"[green]报告已写入 {md}[/green]")
+    if rep.metrics["top1"] < min_top1 or rep.metrics["confident_wrong"] > max_confident_wrong:
+        console.print(f"[red]未达到门槛：top1={rep.metrics['top1']} (>= {min_top1}), "
+                      f"confident_wrong={rep.metrics['confident_wrong']} (<= {max_confident_wrong})[/red]")
+        raise typer.Exit(1)
 
 
 # --------------------------------------------------------------------------- 服务

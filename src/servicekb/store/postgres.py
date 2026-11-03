@@ -30,7 +30,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from servicekb.logging import get_logger
-from servicekb.models import Chunk, DocType, Entity, EntityRelation, SearchFilters, SourceRecord
+from servicekb.models import Chunk, DocType, Entity, EntityRelation, ImageRecord, SearchFilters, SourceRecord
 from servicekb.store.base import DocumentState, IndexMismatchError, Store
 
 log = get_logger(__name__)
@@ -93,7 +93,8 @@ class PostgresStore(Store):
         self.pool.close()
 
     # ------------------------------------------------------------------ 迁移 + 元信息
-    def init(self, embedding_model_id: str, dim: int) -> None:
+    def init(self, embedding_model_id: str, dim: int, image_model_id: str | None = None,
+             image_dim: int | None = None) -> None:
         with self.pool.connection() as conn, conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_ID,))
             conn.execute(
@@ -109,7 +110,9 @@ class PostgresStore(Store):
                         log.warning("migration file changed after being applied", extra={"version": path.stem})
                     continue
                 log.info("applying migration", extra={"version": path.stem})
-                conn.execute(template.replace("{{EMBEDDING_DIM}}", str(int(dim))))
+                sql = template.replace("{{EMBEDDING_DIM}}", str(int(dim)))
+                sql = sql.replace("{{IMAGE_EMBEDDING_DIM}}", str(int(image_dim or 1152)))
+                conn.execute(sql)
                 conn.execute("INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s)", (path.stem, checksum))
 
             meta = dict(conn.execute("SELECT key, value FROM index_meta").fetchall())
@@ -124,13 +127,37 @@ class PostgresStore(Store):
                     f"but config says {embedding_model_id} (dim={dim}). "
                     "Changing the embedding model requires a full rebuild: `servicekb db reset` then re-ingest."
                 )
+            if image_model_id:
+                self._check_image_meta(conn, meta, image_model_id, image_dim)
+
+    @staticmethod
+    def _check_image_meta(conn: Any, meta: dict[str, str], model_id: str, dim: int | None) -> None:
+        col_dim = conn.execute(
+            "SELECT atttypmod FROM pg_attribute WHERE attrelid = 'image_embeddings'::regclass AND attname = 'embedding'"
+        ).fetchone()[0]
+        if dim and col_dim != dim:
+            raise IndexMismatchError(
+                f"image_embeddings.embedding is vector({col_dim}) but the image model outputs {dim} dims. "
+                "Run `servicekb db reset --yes` (or ALTER the column and re-ingest images)."
+            )
+        if "image_embedding_model" not in meta:
+            conn.execute(
+                "INSERT INTO index_meta (key, value) VALUES ('image_embedding_model', %s), ('image_embedding_dim', %s)",
+                (model_id, str(dim)),
+            )
+        elif meta["image_embedding_model"] != model_id:
+            raise IndexMismatchError(
+                f"reference images were embedded with {meta['image_embedding_model']}, config says {model_id}. "
+                "Delete them (DELETE FROM image_embeddings; DELETE FROM index_meta WHERE key LIKE 'image_%') "
+                "and re-ingest the image sources."
+            )
 
     def reset(self) -> None:
         """删除所有表（危险！只在换向量模型或开发时使用）。"""
         with self.pool.connection() as conn:
             conn.execute(
                 "DROP TABLE IF EXISTS feedback, query_logs, ingestion_runs, connector_state, entity_relations, "
-                "entities, chunks, documents, index_meta, schema_migrations CASCADE"
+                "entities, image_embeddings, chunks, documents, index_meta, schema_migrations CASCADE"
             )
 
     # ------------------------------------------------------------------ 过滤条件 → SQL
@@ -351,6 +378,50 @@ class PostgresStore(Store):
             ]
         return ents, rels
 
+    # ------------------------------------------------------------------ 图片
+    def image_state(self, source_id: str) -> dict[str, str]:
+        with self.pool.connection() as conn:
+            rows = conn.execute("SELECT image_id, content_hash FROM image_embeddings WHERE source_id = %s",
+                                (source_id,)).fetchall()
+        return dict(rows)
+
+    def upsert_images(self, records: list[ImageRecord]) -> None:
+        if not records:
+            return
+        with self.pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO image_embeddings (image_id, source_id, entity_id, uri, view, content_hash, acl_groups,
+                    metadata, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (image_id) DO UPDATE SET entity_id = EXCLUDED.entity_id, uri = EXCLUDED.uri,
+                    view = EXCLUDED.view, content_hash = EXCLUDED.content_hash, acl_groups = EXCLUDED.acl_groups,
+                    metadata = EXCLUDED.metadata, embedding = EXCLUDED.embedding, updated_at = now()
+                """,
+                [(r.image_id, r.source_id, r.entity_id, r.uri, r.view, r.content_hash, r.acl_groups,
+                  Jsonb(r.metadata), np.asarray(r.embedding, dtype=np.float32)) for r in records],
+            )
+
+    def delete_images(self, image_ids: list[str]) -> int:
+        if not image_ids:
+            return 0
+        with self.pool.connection() as conn:
+            return conn.execute("DELETE FROM image_embeddings WHERE image_id = ANY(%s::text[])", (image_ids,)).rowcount
+
+    def image_search(self, vector: list[float], k: int, acl_groups: list[str]) -> list[tuple[ImageRecord, float]]:
+        vec = np.asarray(vector, dtype=np.float32)
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT set_config('hnsw.ef_search', %s, true)", (str(self.ef_search),))
+            if self.iterative_scan:
+                conn.execute("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)")
+            rows = conn.execute(
+                "SELECT image_id, source_id, entity_id, uri, view, content_hash, acl_groups, metadata, "
+                "1 - (embedding <=> %s) AS score FROM image_embeddings WHERE acl_groups && %s::text[] "
+                "ORDER BY embedding <=> %s, image_id LIMIT %s",
+                (vec, list(acl_groups), vec, k),
+            ).fetchall()
+        return [(ImageRecord(r[0], r[1], r[2], r[3], r[4], r[5], list(r[6]), r[7] or {}), float(r[8])) for r in rows]
+
     # ------------------------------------------------------------------ 运维
     def get_connector_state(self, source_id: str) -> dict[str, Any] | None:
         with self.pool.connection() as conn:
@@ -410,7 +481,8 @@ class PostgresStore(Store):
             n_chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
             n_ent = conn.execute("SELECT count(*) FROM entities").fetchone()[0]
             n_rel = conn.execute("SELECT count(*) FROM entity_relations").fetchone()[0]
+            n_img = conn.execute("SELECT count(*) FROM image_embeddings").fetchone()[0]
             meta = dict(conn.execute("SELECT key, value FROM index_meta").fetchall())
             size = conn.execute("SELECT pg_size_pretty(pg_total_relation_size('chunks'))").fetchone()[0]
         return {"documents": docs, "chunks": n_chunks, "chunks_by_type": by_type, "entities": n_ent,
-                "relations": n_rel, "chunks_table_size": size, **meta}
+                "relations": n_rel, "images": n_img, "chunks_table_size": size, **meta}

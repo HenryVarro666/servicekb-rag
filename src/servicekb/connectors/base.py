@@ -16,9 +16,27 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from typing import Any
 
-from servicekb.models import Entity, EntityRelation, SourceEvent
+from servicekb.models import Entity, EntityRelation, SourceEvent, stable_id
+
+
+@dataclass
+class ImageSource:
+    """Connector 读出的一张参考图（还没向量化）。"""
+
+    source_id: str
+    rel_path: str  # 在数据源里的相对路径，决定 image_id
+    entity_id: str  # 这张图是哪个对象
+    data: bytes
+    uri: str
+    view: str = ""
+    acl_groups: list[str] = field(default_factory=lambda: ["public"])
+
+    @property
+    def image_id(self) -> str:
+        return stable_id(self.source_id, self.rel_path)
 
 
 class Connector(ABC):
@@ -39,6 +57,10 @@ class Connector(ABC):
     def entities(self) -> tuple[list[Entity], list[EntityRelation]]:
         """对象层数据（实体 + 关系）。只有物料主数据、词典这类数据源需要实现。"""
         return [], []
+
+    def images(self) -> list[ImageSource]:
+        """参考图片（全量快照）。只有参考图库这类数据源需要实现。"""
+        return []
 
     def stats(self) -> dict[str, int]:
         """Connector 自己的统计（例如被质量门槛过滤掉的工单数），会写进 ingestion_runs。"""
