@@ -350,13 +350,14 @@ servicekb-rag/
 | 11 | [10 拍照识别备件](docs/10_part_photo_recognition.md) | SigLIP、OCR、参考图库、长得像的零件、阈值校准 |
 | 12 | [11 多厂家大模型](docs/11_llm_providers.md) | 切换厂家、主备切换、各家接口差异、接入新厂家 |
 | 13 | [12 生产加固](docs/12_production_hardening.md) | 工程评审：并发、降级、过载、安全、监控、故障手册、上线检查清单 |
+| 14 | [13 行业横向对比（2026-11）](docs/13_industry_comparison.md) | 成熟开源项目和大厂托管服务怎么做、本项目的差距、P0 / P1 / P2 改进路线、现在不该做的事 |
 | — | [术语表](docs/glossary.md) | 随时查 |
 
 ---
 
 ## 不足与路线图
 
-当前版本是一个**可以上线试点的骨架**，而不是终点。最重要的几个不足（完整清单和改进方案见 [docs/08_limitations_roadmap.md](docs/08_limitations_roadmap.md)）：
+当前版本是一个**可以上线试点的骨架**，而不是终点。最重要的几个不足（完整清单和改进方案见 [docs/08_limitations_roadmap.md](docs/08_limitations_roadmap.md)；优先级来自 2026-11 对成熟开源项目和大厂服务的横向对比 [docs/13](docs/13_industry_comparison.md)——下一步：200–500 题真实评估集、默认开启重排、版式感知的 PDF 解析、OIDC）：
 
 1. **Postgres 关键词检索不是真 BM25**（`ts_rank` 没有 IDF）→ 计划：BGE-M3 稀疏向量（pgvector `sparsevec`）或 ParadeDB `pg_search`
 2. **PDF 解析只支持文本层**，扫描件、复杂表格要靠 docling / MinerU（已留接口）

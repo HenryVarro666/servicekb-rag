@@ -351,13 +351,14 @@ The docs are in Chinese; titles translated here.
 | 11 | [10 Part photo recognition](docs/10_part_photo_recognition.md) | SigLIP, OCR, reference library, look-alikes, calibration |
 | 12 | [11 LLM vendors](docs/11_llm_providers.md) | Switching vendors, fallback chains, vendor quirks, adding a vendor |
 | 13 | [12 Production hardening](docs/12_production_hardening.md) | Engineering review: concurrency, degradation, overload, security, monitoring, runbook, go-live checklist |
+| 14 | [13 Industry comparison (2026-11)](docs/13_industry_comparison.md) | How mature open-source projects and big-tech managed RAG services compare; gap list; prioritized P0 / P1 / P2 roadmap; what not to do |
 | — | [Glossary](docs/glossary.md) | Look things up |
 
 ---
 
 ## Limitations & roadmap
 
-This version is a **skeleton ready for a pilot**, not the finish line. The most important gaps (full list and improvement designs in [docs/08_limitations_roadmap.md](docs/08_limitations_roadmap.md)):
+This version is a **skeleton ready for a pilot**, not the finish line. The most important gaps (full list and improvement designs in [docs/08_limitations_roadmap.md](docs/08_limitations_roadmap.md); priorities set by the November 2026 comparison against mature open-source projects and big-tech services in [docs/13](docs/13_industry_comparison.md) — next up: a real 200–500 question eval set, reranking on by default, layout-aware PDF parsing, OIDC):
 
 1. **Postgres keyword search isn't true BM25** (`ts_rank` has no IDF) → BGE-M3 sparse vectors (pgvector `sparsevec`) or ParadeDB `pg_search`
 2. **PDF parsing reads the text layer only**; scans and complex tables need docling / MinerU (hook already in place)
