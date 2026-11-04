@@ -118,6 +118,27 @@ class Settings(BaseSettings):
     # 全量同步时，如果"本次没看到的文档"占比超过该值，拒绝删除（防止网盘挂载失败导致清库）
     max_delete_ratio: float = 0.5
 
+    # ------------------------------------------------------------------ 图片识别（拍照识别备件，见 docs/10）
+    # handcrafted: 颜色 / 纹理 / 形状手工特征。零依赖、无语义，只用于 demo / CI（示例图片是程序画的）。
+    # siglip     : 本地加载 SigLIP / SigLIP 2（需要 pip install -e ".[vision]"，建议 GPU）。
+    # http       : 调用已有的图像编码服务（POST 图片，返回向量），适合团队已部署 SigLIP worker 的情况。
+    image_embedding_backend: Literal["handcrafted", "siglip", "http"] = "handcrafted"
+    image_embedding_model: str = "google/siglip-so400m-patch14-384"
+    image_embedding_url: str | None = None  # http 后端用
+    image_embedding_dim: int = 1152  # 只有 http 后端需要手动指定；其他后端由模型自己报告
+    # 高分辨率照片切块：最长边 >= tile_min_side 时，除整图外再切 grid×grid 块分别编码（小零件不会被缩没）
+    image_tile_grid: int = 2
+    image_tile_min_side: int = 1200
+    image_top_k_refs: int = 20  # 每个切块检索多少张参考图
+    # auto: 装了 rapidocr 就用 rapidocr，否则退回 metadata（只读样例图片里预置的标签文字）
+    ocr_backend: Literal["auto", "rapidocr", "metadata", "none"] = "auto"
+    # 序列号格式（示例：AS + 2 位机型码 + YYMM + 6 位流水号）。year / month 两个命名组用于解析出厂年月
+    serial_number_pattern: str = r"\bAS\d{2}(?P<year>\d{2})(?P<month>0[1-9]|1[0-2])\d{6}\b"
+    # 视觉最高分低于该值且 OCR 也没认出料号 → 判定为"未识别"（需要在你们自己的照片上校准！）
+    photo_min_visual_score: float = 0.80
+    # 视觉分数与第一名相差小于该值的候选视为"长得像"，没有 OCR 确认时提示用户拍铭牌
+    photo_lookalike_margin: float = 0.03
+
     # ------------------------------------------------------------------ API 服务
     # 为空 = 不鉴权（仅限本地开发！启动时会打印警告）
     api_keys: list[SecretStr] = Field(default_factory=list)

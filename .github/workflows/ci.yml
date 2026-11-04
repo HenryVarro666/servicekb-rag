@@ -33,3 +33,7 @@ jobs:
       - run: pytest --cov=servicekb --cov-report=term-missing
       - name: Retrieval regression gate (offline embedder)
         run: servicekb eval --min-hit 0.85 --min-refusal 0.9
+      - name: Photo identification gate (handcrafted features + OCR test double)
+        env:
+          SERVICEKB_OCR_BACKEND: metadata
+        run: servicekb photo eval --min-top1 0.9 --max-confident-wrong 0

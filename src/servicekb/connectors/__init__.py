@@ -22,6 +22,7 @@ import yaml
 from servicekb.connectors.base import Connector
 from servicekb.connectors.dictionary import EntityDictionaryConnector
 from servicekb.connectors.filesystem import FilesystemConnector
+from servicekb.connectors.part_images import PartImageConnector
 from servicekb.connectors.parts_master import PartsMasterConnector
 from servicekb.connectors.qa_archive import QAArchiveConnector
 from servicekb.connectors.sharepoint import SharePointConnector
@@ -32,6 +33,7 @@ CONNECTOR_TYPES: dict[str, type[Connector]] = {
     "parts_master": PartsMasterConnector,
     "entity_dictionary": EntityDictionaryConnector,
     "sharepoint": SharePointConnector,
+    "part_images": PartImageConnector,
 }
 
 

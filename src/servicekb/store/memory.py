@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from servicekb.models import Chunk, Entity, EntityRelation, SearchFilters, SourceRecord
+from servicekb.models import Chunk, Entity, EntityRelation, ImageRecord, SearchFilters, SourceRecord
 from servicekb.store.base import DocumentState, IndexMismatchError, Store, chunk_visible
 
 BM25_K1 = 1.2
@@ -39,13 +39,19 @@ class MemoryStore(Store):
         self.runs: list[dict[str, Any]] = []
         self.query_logs: dict[str, dict[str, Any]] = {}
         self.feedback: list[dict[str, Any]] = []
+        self.images: dict[str, ImageRecord] = {}
         self._tf_cache: dict[str, Counter[str]] = {}
 
     # ------------------------------------------------------------------ 生命周期
-    def init(self, embedding_model_id: str, dim: int) -> None:
+    def init(self, embedding_model_id: str, dim: int, image_model_id: str | None = None,
+             image_dim: int | None = None) -> None:
         if self.meta and self.meta.get("embedding_model") != embedding_model_id:
             raise IndexMismatchError(f"index built with {self.meta['embedding_model']}, now {embedding_model_id}")
+        if image_model_id and self.meta.get("image_embedding_model", image_model_id) != image_model_id:
+            raise IndexMismatchError(f"images indexed with {self.meta['image_embedding_model']}, now {image_model_id}")
         self.meta = {"embedding_model": embedding_model_id, "embedding_dim": str(dim)}
+        if image_model_id:
+            self.meta.update(image_embedding_model=image_model_id, image_embedding_dim=str(image_dim))
 
     # ------------------------------------------------------------------ 文档
     def get_document_state(self, doc_id: str) -> DocumentState | None:
@@ -166,6 +172,23 @@ class MemoryStore(Store):
     def token_document_frequency(self, tokens: list[str]) -> tuple[dict[str, int], int]:
         return {t: sum(1 for tf in self._tf_cache.values() if t in tf) for t in set(tokens)}, len(self.chunks)
 
+    # ------------------------------------------------------------------ 图片
+    def image_state(self, source_id: str) -> dict[str, str]:
+        return {i: r.content_hash for i, r in self.images.items() if r.source_id == source_id}
+
+    def upsert_images(self, records: list[ImageRecord]) -> None:
+        self.images.update({r.image_id: r for r in records})
+
+    def delete_images(self, image_ids: list[str]) -> int:
+        return sum(1 for i in image_ids if self.images.pop(i, None) is not None)
+
+    def image_search(self, vector: list[float], k: int, acl_groups: list[str]) -> list[tuple[ImageRecord, float]]:
+        cands = [r for r in self.images.values() if r.embedding is not None and set(r.acl_groups) & set(acl_groups)]
+        if not cands:
+            return []
+        sims = np.asarray([r.embedding for r in cands], dtype=np.float32) @ np.asarray(vector, dtype=np.float32)
+        return [(cands[i], float(sims[i])) for i in np.argsort(-sims)[:k]]
+
     # ------------------------------------------------------------------ 运维
     def get_connector_state(self, source_id: str) -> dict[str, Any] | None:
         return self.connector_state.get(source_id)
@@ -194,4 +217,5 @@ class MemoryStore(Store):
         by_status = Counter(d["status"] for d in self.docs.values())
         by_type = Counter(c.doc_type.value for c in self.chunks.values())
         return {"documents": dict(by_status), "chunks": len(self.chunks), "chunks_by_type": dict(by_type),
-                "entities": len(self.entities), "relations": len(self.relations), **self.meta}
+                "entities": len(self.entities), "relations": len(self.relations), "images": len(self.images),
+                **self.meta}

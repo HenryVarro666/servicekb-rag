@@ -237,6 +237,24 @@ class EntityRelation:
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
+# --------------------------------------------------------------------------- 图片
+
+
+@dataclass
+class ImageRecord:
+    """参考图库里的一张图（目录照片 / CAD 渲染图），对应一个对象（通常是料号）。"""
+
+    image_id: str
+    source_id: str
+    entity_id: str  # part:310-04521-B
+    uri: str
+    view: str = ""
+    content_hash: str = ""
+    acl_groups: list[str] = field(default_factory=lambda: ["public"])
+    metadata: dict[str, Any] = field(default_factory=dict)
+    embedding: list[float] | None = None
+
+
 # --------------------------------------------------------------------------- 回答
 
 

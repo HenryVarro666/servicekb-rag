@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from servicekb.models import Chunk, Entity, EntityRelation, SearchFilters, SourceRecord
+from servicekb.models import Chunk, Entity, EntityRelation, ImageRecord, SearchFilters, SourceRecord
 
 
 @dataclass
@@ -35,8 +35,9 @@ class IndexMismatchError(RuntimeError):
 class Store(ABC):
     # ------------------------------------------------------------------ 生命周期
     @abstractmethod
-    def init(self, embedding_model_id: str, dim: int) -> None:
-        """建表 / 迁移，并校验 index_meta 里的模型与当前配置一致。"""
+    def init(self, embedding_model_id: str, dim: int, image_model_id: str | None = None,
+             image_dim: int | None = None) -> None:
+        """建表 / 迁移，并校验 index_meta 里的（文本 / 图像）向量模型与当前配置一致。"""
 
     def close(self) -> None:  # noqa: B027  可选实现
         pass
@@ -90,6 +91,21 @@ class Store(ABC):
     @abstractmethod
     def token_document_frequency(self, tokens: list[str]) -> tuple[dict[str, int], int]:
         """返回 ({token: 包含该 token 的块数}, 总块数)，用于计算 IDF（拒答判断用）。"""
+
+    # ------------------------------------------------------------------ 图片（参考图库）
+    @abstractmethod
+    def image_state(self, source_id: str) -> dict[str, str]:
+        """该数据源已入库图片的 {image_id: content_hash}，用于增量判断。"""
+
+    @abstractmethod
+    def upsert_images(self, records: list[ImageRecord]) -> None: ...
+
+    @abstractmethod
+    def delete_images(self, image_ids: list[str]) -> int: ...
+
+    @abstractmethod
+    def image_search(self, vector: list[float], k: int, acl_groups: list[str]) -> list[tuple[ImageRecord, float]]:
+        """按余弦相似度检索参考图，返回 (图片, 相似度)。"""
 
     # ------------------------------------------------------------------ 运维
     @abstractmethod

@@ -513,7 +513,96 @@ def chat_cleaning(lang: str) -> SVG:
     return s
 
 
-DIAGRAMS = [architecture, query_flow, ingest_pipeline, object_layer, chat_cleaning]
+# =========================================================================== 6. 拍照识别备件
+
+
+def part_photo(lang: str) -> SVG:
+    def T(zh, en):
+        return zh if lang == "zh" else en
+
+    s = SVG(1200, 640, "part_photo")
+    s.text(600, 38, T("拍照识别备件：视觉 + OCR + 对象层 + 知识库", "Part photo recognition: vision + OCR + objects + KB"),
+           22, 700)
+
+    s.box(24, 250, 136, 84, [T("现场照片", "Site photo"), T("手机 / 3000+ 像素", "phone, 3000+ px")], "gray")
+
+    # OCR 路
+    s.frame(184, 62, 330, 196, T("① OCR（先跑）", "① OCR (runs first)"), kind="frame")
+    s.box(200, 104, 298, 52, ["RapidOCR", T("标签 / 铭牌 / 本体规格文字", "labels / nameplates / printed specs")], "source",
+          sizes=[14, 11])
+    s.box(200, 168, 144, 74, [T("文本规范化", "Normalize"), T("P/N310… → P/N 310…", "P/N310… → P/N 310…"),
+                             T("O→0  I→1", "O→0  I→1")], "source", sizes=[13, 11, 11])
+    s.box(354, 168, 144, 74, [T("实体 + 序列号", "Entities + serial"), "part:310-04521-A",
+                             T("出厂 2022-01", "built 2022-01")], "source", sizes=[13, 11, 11])
+    s.arrow([(349, 156), (349, 167)], C["source"][1])
+    s.arrow([(344, 205), (353, 205)], C["source"][1])
+
+    # 视觉路
+    s.frame(184, 290, 330, 330, T("② 视觉", "② Vision"), kind="frame")
+    s.box(200, 330, 298, 52, [T("涂掉标签文字区域", "Mask label text boxes"),
+                             T("贴纸每台都不一样，只会干扰外观匹配", "stickers vary per unit and confuse matching")],
+          "query", sizes=[13, 11])
+    s.box(200, 396, 298, 52, [T("整图 + 2×2 切块", "Whole image + 2×2 tiles"),
+                             T("小零件不会被缩没；纯色块跳过", "small parts survive; blank tiles skipped")],
+          "query", sizes=[13, 11])
+    s.box(200, 462, 298, 52, [T("SigLIP 图像向量", "SigLIP image embeddings"),
+                             T("补成正方形再缩放 · L2 归一化", "pad to square · L2-normalize")], "query", sizes=[13, 11])
+    s.box(200, 528, 298, 76, [T("pgvector HNSW 检索参考图库", "pgvector HNSW over reference images"),
+                             T("每个料号一个文件夹：目录照 / CAD 渲染 / 标签特写", "one folder per part: catalog / CAD / label"),
+                             T("每个料号取最高相似度", "max similarity per part")], "store", sizes=[13, 11, 11])
+    for y in (382, 448, 514):
+        s.arrow([(349, y), (349, y + 13)], C["query"][1])
+    s.arrow([(160, 292), (172, 292), (172, 356), (199, 356)], LINE)
+    s.arrow([(160, 292), (172, 292), (172, 130), (199, 130)], LINE)
+    s.arrow([(426, 258), (426, 329)], C["source"][1], dash="4 3", label=T("文字框", "text boxes"), label_at=(436, 296),
+            label_anchor="start")
+
+    # 融合
+    s.rect(540, 200, 300, 300, *C["warn"], rx=12)
+    s.text(690, 228, T("③ 融合与判断", "③ Fuse & decide"), 15, 700)
+    rules = [
+        (T("标签读到料号", "Part no. on label"), "+1.0"),
+        (T("本体规格一致（1500V）", "Printed spec (1500V)"), "+0.05"),
+        (T("外观相似度", "Visual similarity"), "0 ~ 1"),
+    ]
+    for i, (a_, b_) in enumerate(rules):
+        y = 252 + i * 30
+        s.text(560, y + 14, a_, 12, 500, "start")
+        s.text(820, y + 14, b_, 12, 700, "end", C["warn"][1], mono=True)
+    s.lines(690, 400, [T("长得像 → 提醒拍铭牌", "look-alikes → ask for the label"),
+                       T("（分差 < 0.03，或新旧版本 < 0.10）", "(gap < 0.03, or old/new revisions < 0.10)"),
+                       T("最高分 < 0.80 且无标签 → 未识别", "best < 0.80 and no label → unknown"),
+                       T("标签与外观矛盾 → 人工确认", "label vs. look mismatch → review")],
+            [13, 11, 13, 13], [600, 400, 600, 600], [INK, MUTED, INK, INK])
+    s.arrow([(514, 205), (539, 260)], C["source"][1])
+    s.arrow([(514, 566), (539, 440)], C["store"][1])
+
+    # 输出
+    s.box(866, 120, 310, 92, [T("✅ 识别为 310-04521-A", "✅ Identified: 310-04521-A"),
+                             T("证据：标签文字 + 外观相似度", "evidence: label text + visual similarity")], "good",
+          sizes=[15, 12])
+    s.box(866, 232, 310, 80, [T("📝 外观相同：220-11008-A / 220-11009-A", "📝 Look-alike: 220-11008-A / -11009-A"),
+                             T("请拍标签确认，不要仅凭外观下单", "photograph the label before ordering")], "warn",
+          sizes=[13, 12])
+    s.box(866, 332, 310, 68, [T("❓ 未识别", "❓ Unknown"), T("拍铭牌 / 转人工，不硬猜", "ask for label / escalate")], "bad",
+          sizes=[14, 12])
+    s.arrow([(840, 300), (853, 300), (853, 166), (865, 166)], C["warn"][1])
+    s.arrow([(840, 300), (865, 272)], C["warn"][1])
+    s.arrow([(840, 300), (853, 300), (853, 366), (865, 366)], C["warn"][1])
+
+    s.box(866, 432, 310, 96, [T("④ 对象层 + 知识库", "④ Object layer + KB"),
+                             T("停产？→ 已被 310-04521-B 替代", "obsolete? → replaced by 310-04521-B"),
+                             T("出厂 2022-01 → 需要转接支架", "built 2022-01 → bracket needed"),
+                             T("手册 / 通告 / 工单 + 引用 [n]", "manual / bulletin / tickets + [n]")], "store",
+          sizes=[14, 11, 11, 11])
+    s.arrow([(1100, 212), (1100, 216), (1186, 216), (1186, 480), (1177, 480)], C["good"][1])
+    s.text(600, 624, T("命令：servicekb photo identify / ask / eval ｜ 文档：docs/10_part_photo_recognition.md",
+                       "CLI: servicekb photo identify / ask / eval | Doc: docs/10_part_photo_recognition.md"),
+           12, 600, "middle", MUTED)
+    return s
+
+
+DIAGRAMS = [architecture, query_flow, ingest_pipeline, object_layer, chat_cleaning, part_photo]
 
 
 def main() -> None:

@@ -51,3 +51,9 @@
 | RSC | Resource-Specific Consent | Teams 资源级授权，由 Team owner 授予应用读取某个 Team 的权限 | docs/09 |
 | 会话切分 | Sessionization | 把无线程的聊天流按时间间隔切成会话 | `chat/cleaner.py::build_threads` |
 | 对话解缠 | Conversation disentanglement | 把交错的多话题聊天分开 | docs/09 |
+| SigLIP | Sigmoid Loss for Language-Image Pre-training | Google 的图文双塔模型，本项目用它的图像编码器做"以图搜图" | `vision/embedders.py` |
+| 参考图库 | Reference library | 每个料号的目录照片 / CAD 渲染 / 标签特写，现场照片和它比对 | `connectors/part_images.py` |
+| OCR | Optical Character Recognition | 从图片里读出文字（标签、铭牌、序列号） | `vision/ocr.py` |
+| 切块（图片） | Tiling | 高分辨率照片切成几块分别编码，避免小零件被缩没 | `vision/images.py::make_crops` |
+| 长得像的零件 | Look-alikes | 外观几乎相同的料号（新旧版本、不同额定值），必须靠标签区分 | `vision/identify.py` |
+| 自信答错率 | Confident-wrong rate | 给出料号、没有任何提醒、而且是错的比例；拍照识别最重要的指标 | `vision/evaluate.py` |

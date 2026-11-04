@@ -114,6 +114,8 @@ sequenceDiagram
 | 新向量模型服务 | `embedding.py` | `Embedder.embed_documents()` |
 | 新检索通道 | `retrieval/retriever.py` | 在 `channels` 里加一路，RRF 自动融合 |
 | 新 LLM | `generation/generator.py` | `Generator.generate()`；OpenAI-compatible 的服务直接改配置即可 |
+| 新图像模型 / 图像编码服务 | `vision/embedders.py` | `ImageEmbedder.embed_images()`；已有 SigLIP / 手工特征 / HTTP 三种 |
+| 新 OCR 引擎（含条码） | `vision/ocr.py` | `OCREngine.read()`（能给文字框的再实现 `read_with_boxes()`） |
 
 ## 6. 配置
 

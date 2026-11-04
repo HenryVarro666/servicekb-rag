@@ -15,16 +15,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from servicekb.connectors.base import Connector
+from servicekb.connectors.base import Connector, ImageSource
 from servicekb.embedding import Embedder
 from servicekb.logging import get_logger
-from servicekb.models import Chunk, DocType, ParsedDocument, SourceRecord, Tombstone, content_hash, stable_id
+from servicekb.models import (
+    Chunk,
+    DocType,
+    ImageRecord,
+    ParsedDocument,
+    SourceRecord,
+    Tombstone,
+    content_hash,
+    stable_id,
+)
 from servicekb.parsing import parse
 from servicekb.processing.chunking import ChunkingConfig, chunk_document
 from servicekb.processing.dedup import simhash
@@ -53,6 +63,9 @@ class IngestReport:
     embeddings_computed: int = 0
     embeddings_reused: int = 0
     entities: int = 0
+    images_indexed: int = 0
+    images_unchanged: int = 0
+    images_deleted: int = 0
     connector_stats: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     duration_s: float = 0.0
@@ -80,9 +93,11 @@ class IngestionPipeline:
         chunk_cfg: ChunkingConfig,
         max_delete_ratio: float = 0.5,
         batch_chunks: int = 256,
+        image_embedder: Any = None,
     ) -> None:
         self.store = store
         self.embedder = embedder
+        self.image_embedder = image_embedder
         self.linker = linker
         self.chunk_cfg = chunk_cfg
         self.max_delete_ratio = max_delete_ratio
@@ -257,6 +272,11 @@ class IngestionPipeline:
                 report.entities = len(ents)
                 self.reload_linker()
 
+            # 1.5) 参考图库（拍照识别备件用）
+            imgs = connector.images()
+            if imgs:
+                self._index_images(source_id, imgs, report)
+
             # 2) 文档层
             state = self.store.get_connector_state(source_id)
             pv = self.pipeline_version()
@@ -306,6 +326,47 @@ class IngestionPipeline:
             self.store.finish_run(run_id, report.status, report.as_dict(), error)
         log.info("ingestion finished", extra={k: v for k, v in report.as_dict().items() if k != "errors"})
         return report
+
+    # ------------------------------------------------------------------ 参考图片
+    def _index_images(self, source_id: str, imgs: list[ImageSource], report: IngestReport) -> None:
+        """和文档同样的增量逻辑：图片字节 + 模型 ID 没变就跳过；文件夹里删掉的图从索引里删掉。"""
+        from servicekb.vision.images import load_image
+
+        if self.image_embedder is None:
+            raise RuntimeError(f"source {source_id} has images but no image embedder is configured")
+        model_id = self.image_embedder.model_id
+        existing = self.store.image_state(source_id)
+        todo: list[tuple[ImageSource, str]] = []
+        for src in imgs:
+            # 指纹 = 图片字节 + 模型 + 对象 + 视角 + 权限：任何一项变了都重新入库
+            meta = f"|{model_id}|{src.entity_id}|{src.view}|{','.join(src.acl_groups)}".encode()
+            h = hashlib.sha256(src.data + meta).hexdigest()
+            if existing.get(src.image_id) == h:
+                report.images_unchanged += 1
+            else:
+                todo.append((src, h))
+            if src.entity_id not in self.linker.entities:
+                report.connector_stats.setdefault("unknown_image_entities", []).append(src.entity_id)
+        for i in range(0, len(todo), 32):
+            batch = todo[i : i + 32]
+            loaded: list[tuple[ImageSource, str, Any]] = []
+            for src, h in batch:
+                try:
+                    loaded.append((src, h, load_image(src.data)))
+                except Exception as e:  # 单张坏图不影响其他图片
+                    report.failed += 1
+                    report.errors.append(f"{source_id}:{src.rel_path}: cannot read image: {e!r}")
+            vecs = self.image_embedder.embed_images([im for _, _, im in loaded])
+            self.store.upsert_images([
+                ImageRecord(src.image_id, source_id, src.entity_id, src.uri, src.view, h, src.acl_groups,
+                            {"rel_path": src.rel_path, "size": list(im.size)}, v)
+                for (src, h, im), v in zip(loaded, vecs, strict=True)
+            ])
+            report.images_indexed += len(loaded)
+        gone = set(existing) - {s.image_id for s in imgs}
+        report.images_deleted += self.store.delete_images(sorted(gone))
+        if "unknown_image_entities" in report.connector_stats:
+            report.connector_stats["unknown_image_entities"] = sorted(set(report.connector_stats["unknown_image_entities"]))
 
     def reload_linker(self) -> None:
         """从数据库重新加载对象层（实体 + 关系），并把领域词加进分词词典。"""
