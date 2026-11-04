@@ -15,16 +15,21 @@ RAG 小知识
 - ``HashingEmbedder``：字符 n-gram 哈希。零依赖、确定性、**没有语义理解能力**，只用于 demo / CI。
 - ``SentenceTransformerEmbedder``：本地 GPU 跑开源模型，推荐 BAAI/bge-m3（中英混合、8192 长度、1024 维）。
 - ``OpenAIEmbedder``：OpenAI 官方，或任何 OpenAI-compatible 服务（HuggingFace TEI、vLLM、Ollama）。
+
+``CachedQueryEmbedder`` 包在任何实现外面，缓存"问题 → 向量"（文档向量不缓存，导入时有自己的复用逻辑）。
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+import threading
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 
 import numpy as np
 
+from servicekb import metrics
 from servicekb.config import Settings
 
 
@@ -125,10 +130,13 @@ class OpenAIEmbedder(Embedder):
         batch_size: int = 64,
         query_prefix: str = "",
         passage_prefix: str = "",
+        timeout_s: float = 30.0,
+        max_retries: int = 2,
     ) -> None:
         from openai import OpenAI
 
-        self.client = OpenAI(api_key=api_key or "EMPTY", base_url=base_url)
+        # 超时一定要设：SDK 默认 600 秒，向量服务卡住时每个请求都会挂很久
+        self.client = OpenAI(api_key=api_key or "EMPTY", base_url=base_url, timeout=timeout_s, max_retries=max_retries)
         self.model, self.dim, self.batch_size = model, dim, batch_size
         self.base_url = base_url or "openai"
         self.query_prefix, self.passage_prefix = query_prefix, passage_prefix
@@ -154,7 +162,52 @@ class OpenAIEmbedder(Embedder):
         return self._encode([self.query_prefix + text])[0]
 
 
+class CachedQueryEmbedder(Embedder):
+    """给 ``embed_query`` 加一层线程安全的 LRU 缓存。
+
+    为什么值得做：现场工程师的问题高度重复（同一个故障码一天被问几十次），问题向量每次都要
+    调一次 GPU 服务（网络往返 + 排队，通常 10~50 ms）。缓存命中时是微秒级。
+    缓存键是问题原文；换模型时整个进程会重启（index_meta 校验），不存在"旧向量"的问题。
+    """
+
+    def __init__(self, inner: Embedder, maxsize: int = 4096) -> None:
+        self.inner, self.maxsize, self.dim = inner, maxsize, inner.dim
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._lock = threading.Lock()
+        self.hits = self.misses = 0
+
+    @property
+    def model_id(self) -> str:
+        return self.inner.model_id
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self.inner.embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        with self._lock:
+            vec = self._cache.get(text)
+            if vec is not None:
+                self._cache.move_to_end(text)
+                self.hits += 1
+                metrics.EMBED_CACHE.labels("hit").inc()
+                return list(vec)
+            self.misses += 1
+        metrics.EMBED_CACHE.labels("miss").inc()
+        vec = self.inner.embed_query(text)  # 在锁外计算：慢调用不能阻塞其他线程
+        with self._lock:
+            self._cache[text] = vec
+            self._cache.move_to_end(text)
+            while len(self._cache) > self.maxsize:
+                self._cache.popitem(last=False)
+        return list(vec)
+
+
 def build_embedder(s: Settings) -> Embedder:
+    e = _build_base_embedder(s)
+    return CachedQueryEmbedder(e, s.query_embedding_cache_size) if s.query_embedding_cache_size > 0 else e
+
+
+def _build_base_embedder(s: Settings) -> Embedder:
     if s.embedding_backend == "hashing":
         return HashingEmbedder(dim=s.embedding_dim)
     if s.embedding_backend == "sentence_transformers":
@@ -170,4 +223,5 @@ def build_embedder(s: Settings) -> Embedder:
         api_key=s.embedding_api_key.get_secret_value() if s.embedding_api_key else None,
         base_url=s.embedding_base_url, batch_size=s.embedding_batch_size,
         query_prefix=s.embedding_query_prefix, passage_prefix=s.embedding_passage_prefix,
+        timeout_s=s.embedding_timeout_s, max_retries=s.embedding_max_retries,
     )

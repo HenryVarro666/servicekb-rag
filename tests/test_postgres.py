@@ -84,3 +84,33 @@ def test_photo_identification_on_postgres(pg_kb):
 def test_refuses_mismatched_image_model(pg_kb):
     with pytest.raises(IndexMismatchError):
         pg_kb.store.init(pg_kb.embedder.model_id, pg_kb.embedder.dim, "siglip:other:1152", 1152)
+
+
+def test_query_log_ops_columns_and_prune(pg_kb):
+    r = pg_kb.ask("客户 13812345678 问：E037 绝缘阻抗低怎么处理？", ["public", "service"], client="teams-bot")
+    with pg_kb.store.pool.connection() as conn:
+        q, reason, degraded, usage, client = conn.execute(
+            "SELECT question, reason, degraded, usage, client FROM query_logs WHERE query_id = %s", (r.query_id,)
+        ).fetchone()
+        assert "[PHONE]" in q and client == "teams-bot" and isinstance(degraded, list) and isinstance(usage, dict)
+        conn.execute("UPDATE query_logs SET created_at = now() - interval '400 days'")
+    keep = pg_kb.ask("E038 怎么处理？", ["public", "service"])
+    with pg_kb.store.pool.connection() as conn:
+        conn.execute("UPDATE query_logs SET created_at = now() - interval '400 days' WHERE query_id = %s",
+                     (keep.query_id,))
+    assert pg_kb.feedback(keep.query_id, 1, None, "专家答案")
+    n = pg_kb.store.prune_query_logs(180)
+    assert n >= 1
+    with pg_kb.store.pool.connection() as conn:
+        left = {str(x[0]) for x in conn.execute("SELECT query_id FROM query_logs").fetchall()}
+    assert keep.query_id in left and r.query_id not in left  # 有反馈的保留
+
+
+def test_source_lock_is_exclusive_across_connections(pg_kb):
+    st = pg_kb.store
+    with st.source_lock("manuals") as a:
+        assert a
+        with st.source_lock("manuals") as b, st.source_lock("bulletins") as c:
+            assert not b and c  # 同一数据源互斥，不同数据源互不影响
+    with st.source_lock("manuals") as again:
+        assert again  # 释放后可以再拿到

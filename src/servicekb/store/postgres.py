@@ -22,6 +22,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,7 @@ log = get_logger(__name__)
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _MIGRATION_LOCK_ID = 73_100_001  # 任意常量，用于 pg_advisory_xact_lock
+_SOURCE_LOCK_NS = 7310  # 导入锁的命名空间（advisory lock 的第一个 int4 参数），避免和其他锁冲突
 
 _CHUNK_COLS = (
     "c.chunk_id, c.doc_id, c.ordinal, c.text, c.heading_path, c.page, c.doc_type, c.acl_groups, "
@@ -454,14 +457,43 @@ class PostgresStore(Store):
             conn.execute(
                 """
                 INSERT INTO query_logs (query_id, question, user_groups, filters, retrieved, answer, citations,
-                    escalate, model, prompt_version, timings_ms)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    escalate, model, prompt_version, timings_ms, reason, degraded, usage, request_id, client)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (entry["query_id"], entry["question"], entry.get("user_groups", []), Jsonb(entry.get("filters", {})),
                  Jsonb(entry.get("retrieved", [])), entry.get("answer"), Jsonb(entry.get("citations", [])),
                  entry.get("escalate", False), entry.get("model"), entry.get("prompt_version"),
-                 Jsonb(entry.get("timings_ms", {}))),
+                 Jsonb(entry.get("timings_ms", {})), entry.get("reason", ""), list(entry.get("degraded", [])),
+                 Jsonb(entry.get("usage", {})), entry.get("request_id"), entry.get("client")),
             )
+
+    def prune_query_logs(self, older_than_days: int, keep_feedback: bool = True) -> int:
+        with self.pool.connection() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM query_logs q
+                WHERE q.created_at < now() - make_interval(days => %s)
+                  AND (NOT %s OR NOT EXISTS (SELECT 1 FROM feedback f WHERE f.query_id = q.query_id))
+                """,
+                (int(older_than_days), keep_feedback),
+            )
+            return cur.rowcount
+
+    @contextmanager
+    def source_lock(self, source_id: str) -> Iterator[bool]:
+        """跨进程的导入锁：session 级 advisory lock，持有期间占用一个**独立**连接（不占连接池）。
+        进程崩溃 / 连接断开时数据库自动释放锁，不会出现"锁永远不释放"。"""
+        key = int.from_bytes(hashlib.sha256(source_id.encode()).digest()[:4], "big", signed=True)
+        conn = psycopg.connect(self.dsn, autocommit=True)
+        try:
+            acquired = bool(conn.execute("SELECT pg_try_advisory_lock(%s, %s)", (_SOURCE_LOCK_NS, key)).fetchone()[0])
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    conn.execute("SELECT pg_advisory_unlock(%s, %s)", (_SOURCE_LOCK_NS, key))
+        finally:
+            conn.close()
 
     def log_feedback(self, query_id: str, rating: int, comment: str | None, corrected_answer: str | None) -> bool:
         with self.pool.connection() as conn:

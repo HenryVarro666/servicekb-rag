@@ -38,17 +38,19 @@
 | G3 | 没有 LLM 裁判的忠实度评估 | 幻觉只能靠人工抽查发现 | P1 |
 | G4 | 不支持多轮对话 | 追问需要把上下文重新说一遍 | P2 |
 | G5 | 没有流式输出 | 长答案等待时间长 | P2 |
-| G7 | 多厂家大模型只在 Mock 接口上测试过，没有对真实厂家跑过评估；没有记录 token 用量 / 成本；主备切换没有熔断 | 换厂家前不知道效果和成本；主模型故障期间每个请求先等一次超时 | P1（见 [docs/11](11_llm_providers.md#10-当前不足和改进方向)）|
+| G7 | 多厂家大模型只在 Mock 接口上测试过，没有对真实厂家跑过评估（token 用量记录、熔断已完成，见 [docs/12](12_production_hardening.md)）| 换厂家前不知道效果和成本 | P1（见 [docs/11](11_llm_providers.md#10-当前不足和改进方向)）|
 
 ### 1.4 工程
 
 | # | 不足 | 优先级 |
 | --- | --- | --- |
 | E1 | API 鉴权只有 API Key；用户身份依赖网关传入 | P0（接 Entra ID / OIDC）|
-| E2 | 没有 OpenTelemetry 链路追踪、Prometheus 指标 | P1 |
+| E2 | ~~没有 Prometheus 指标~~ ✅ 已有 `/metrics` + 请求 ID（[docs/12](12_production_hardening.md)）；还没有 OpenTelemetry 链路追踪 | P1 |
 | E3 | Docker / GPU 配置未在真实 GPU 环境验证 | P0 |
 | E4 | 没有前端 | P1（Teams 机器人或简单 Web 页面）|
 | E5 | 评估集只有 18 道虚构题 | P0（用真实工单建 100~200 题）|
+| E6 | 没有流式输出、换向量模型需要停机重建、用户身份依赖网关传入（详见 [docs/12 §6](12_production_hardening.md#6-还没做的按优先级)） | P0 / P1 |
+| E7 | 压测只在示例数据 + 单机上做过；真实 GPU 部署下的容量（p95、最大吞吐）未知 | P0（用 `scripts/loadtest.py` 在真实部署上测）|
 
 ## 2. 路线图总览
 

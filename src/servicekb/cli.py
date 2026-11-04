@@ -13,6 +13,8 @@
     servicekb llm providers             # 查看支持的大模型厂家
     servicekb llm test                  # 测试当前配置的大模型能否调通
     servicekb serve                     # 启动 HTTP API
+    servicekb doctor                    # 上线前自检：依赖是否可用、有没有危险配置
+    servicekb db prune-logs             # 清理过期的查询日志
 
 注意：``store_backend=memory`` 时每条命令都是新进程、数据不保留，所以 ask / search / eval
 会先自动导入一遍示例数据。生产请用 postgres。
@@ -235,6 +237,46 @@ def db_reset(yes: bool = typer.Option(False, "--yes", help="确认删除所有�
     st.reset()
     st.close()
     console.print("[green]已删除所有表。执行 `servicekb db init` 和 `servicekb ingest` 重建。[/green]")
+
+
+@db_app.command("prune-logs")
+def db_prune_logs(
+    days: int | None = typer.Option(None, help="删除多少天之前的查询日志（默认 SERVICEKB_QUERY_LOG_RETENTION_DAYS）"),
+    include_feedback: bool = typer.Option(False, help="连有用户反馈的记录也删（默认保留：它们是评估集的来源）"),
+) -> None:
+    """清理过期的查询日志：控制表大小，也是数据最小化（隐私合规）的要求。建议每天定时跑一次。"""
+    s = _settings()
+    kb = _kb(auto_ingest=False)
+    n = kb.store.prune_query_logs(days if days is not None else s.query_log_retention_days,
+                                  keep_feedback=not include_feedback)
+    console.print(f"[green]已删除 {n} 条查询日志[/green]")
+
+
+# --------------------------------------------------------------------------- 自检
+
+
+@app.command()
+def doctor(
+    llm: bool = typer.Option(False, "--llm", help="实际调用一次大模型（会产生少量费用）"),
+    vision: bool = typer.Option(False, "--vision", help="加载图像模型并编码一张测试图（SigLIP 会下载 / 加载权重）"),
+) -> None:
+    """上线前自检：每个依赖实际调用一次，并检查危险配置。有 ✗ 时退出码为 1（可放进部署流水线）。"""
+    from rich.markup import escape
+
+    from servicekb.doctor import run_checks
+
+    s = _settings()
+    checks = run_checks(s, call_llm=llm, vision=vision)
+    t = Table(title="servicekb doctor")
+    t.add_column("检查项")
+    t.add_column("结果")
+    t.add_column("说明", overflow="fold")
+    icon = {"ok": "[green]✓[/green]", "warn": "[yellow]⚠[/yellow]", "fail": "[red]✗[/red]"}
+    for c in checks:
+        t.add_row(c.name, icon[c.status], escape(c.detail))
+    console.print(t)
+    if any(c.status == "fail" for c in checks):
+        raise typer.Exit(1)
 
 
 # --------------------------------------------------------------------------- 审计
@@ -489,8 +531,17 @@ def llm_test(
 
 
 @app.command()
-def serve(host: str = "0.0.0.0", port: int = 8000, workers: int = 1) -> None:
-    """启动 HTTP API（FastAPI）。文档：http://localhost:8000/docs"""
+def serve(
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    workers: int = typer.Option(1, envvar="WEB_CONCURRENCY",
+                                help="进程数（默认读 WEB_CONCURRENCY）。Python 单进程受 GIL 限制，CPU 密集时多开几个"),
+) -> None:
+    """启动 HTTP API（FastAPI）。文档：http://localhost:8000/docs
+
+    进程数怎么定：容器部署（K8s）推荐每个容器 1 个进程、靠副本数扩容；单机部署设成 CPU 核数左右。
+    注意每个进程都会各自加载模型（进程内的 sentence-transformers / SigLIP），所以 GPU 模型建议独立部署成服务（TEI）。
+    """
     import uvicorn
 
     s = _settings()

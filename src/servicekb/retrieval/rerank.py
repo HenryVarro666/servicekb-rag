@@ -55,10 +55,14 @@ class CrossEncoderReranker(Reranker):
 class TEIReranker(Reranker):
     """调用 HuggingFace text-embeddings-inference 部署的 reranker（推荐生产用：独立服务、可扩缩容）。"""
 
-    def __init__(self, url: str, timeout: float = 30.0) -> None:
+    def __init__(self, url: str, timeout: float = 10.0) -> None:
         self.name = f"tei:{url}"
         self.url = url.rstrip("/")
-        self.http = httpx.Client(timeout=timeout)
+        # retries=1：只重试"连接失败"（服务重启的瞬间），不重试超时——超时说明服务过载，重试只会更糟
+        self.http = httpx.Client(timeout=timeout, transport=httpx.HTTPTransport(retries=1))
+
+    def close(self) -> None:
+        self.http.close()
 
     def score(self, query: str, passages: list[str]) -> list[float]:
         if not passages:
@@ -78,4 +82,4 @@ def build_reranker(s: Settings) -> Reranker | None:
         return CrossEncoderReranker(s.reranker_model, s.embedding_device)
     if not s.reranker_url:
         raise ValueError("SERVICEKB_RERANKER_URL is required for reranker_backend=tei")
-    return TEIReranker(s.reranker_url)
+    return TEIReranker(s.reranker_url, timeout=s.reranker_timeout_s)

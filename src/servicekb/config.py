@@ -42,6 +42,14 @@ class LLMSpec(BaseModel):
     gcp_region: str = "global"
 
 
+class ApiClient(BaseModel):
+    """一个 API 调用方：名字（写进日志 / 指标）、密钥、允许访问的用户组（None = 不限制，等同可信网关）。"""
+
+    name: str
+    key: SecretStr
+    groups: list[str] | None = None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SERVICEKB_",
@@ -57,7 +65,9 @@ class Settings(BaseSettings):
     store_backend: Literal["memory", "postgres"] = "memory"
     database_url: str = "postgresql://servicekb:servicekb@localhost:5432/servicekb"
     db_pool_min_size: int = 1
-    db_pool_max_size: int = 10
+    # 每个问答请求最多同时占用 3 个连接（三路检索并行）+ 1 个（写日志）。
+    # 经验值：max_size ≈ 3 × 单进程并发请求数；多进程部署时总连接数 = 进程数 × max_size，别超过数据库的 max_connections
+    db_pool_max_size: int = 20
     # HNSW 查询时的候选队列长度。越大召回越高、越慢。pgvector 默认 40。
     hnsw_ef_search: int = 100
 
@@ -77,6 +87,11 @@ class Settings(BaseSettings):
     # 有些模型（e5 / bge-v1.5 英文版）要求给 query 加指令前缀；bge-m3 不需要，留空即可。
     embedding_query_prefix: str = ""
     embedding_passage_prefix: str = ""
+    # 远程向量服务（openai 后端）的超时 / 重试。SDK 默认超时是 600 秒——服务卡住时请求会挂 10 分钟，必须改小
+    embedding_timeout_s: float = 30.0
+    embedding_max_retries: int = 2
+    # 问题向量的 LRU 缓存条数（0 = 关闭）。售后问题重复率高（同一个故障码被反复问），命中后省掉一次模型调用
+    query_embedding_cache_size: int = 4096
 
     # ------------------------------------------------------------------ 重排模型（Reranker）
     # none         : 不重排，直接用融合分数。
@@ -88,6 +103,7 @@ class Settings(BaseSettings):
     reranker_candidates: int = 40  # 送进 reranker 的候选数（越多越准、越慢）
     # 重排分数（sigmoid 后 0~1）低于此值的证据视为"不相关"。需要在你们自己的评估集上校准！
     reranker_min_score: float = 0.15
+    reranker_timeout_s: float = 10.0  # tei 后端：重排超时就降级为融合排序，不让整个请求卡住
 
     # ------------------------------------------------------------------ 大模型（LLM），见 docs/11
     # 厂家（provider）：
@@ -112,6 +128,10 @@ class Settings(BaseSettings):
     llm_max_tokens: int | None = None  # None = 厂家默认（Claude 16000，因为思考也占输出 token；其他 1024）
     llm_timeout_s: float = 60.0
     llm_max_retries: int = 2  # SDK 内置重试（429 / 5xx / 网络错误）
+    # 熔断：某个厂家连续失败 N 次后"断开" cooldown 秒，期间直接跳过它（不再每个请求都等一次超时），
+    # 冷却后放一个请求试探，成功就恢复。0 = 不熔断
+    llm_circuit_failures: int = 3
+    llm_circuit_cooldown_s: float = 30.0
     # Claude 专用：思考深度（low / medium / high / xhigh / max）；RAG 问答 medium 足够
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = "medium"
     # Claude 官方 API 专用：被安全分类器拒答时，服务端自动换模型重跑（server-side fallback）
@@ -163,6 +183,10 @@ class Settings(BaseSettings):
     min_keyword_coverage: float = 0.30
     # 近似重复折叠：两个块 SimHash 汉明距离 <= 该值视为重复，只保留一个
     near_dup_hamming: int = 3
+    # 三路召回的线程池大小（**整个进程共享**）。旧版本固定为 3：并发请求时所有请求排队等这 3 个线程。
+    # 经验值：≥ 3 × 单进程并发请求数。真正的并发上限还受 db_pool_max_size 约束
+    retrieval_max_workers: int = 48  # = 3 × max_concurrent_requests 的默认值
+    retrieval_channel_timeout_s: float = 10.0  # 单路召回超时：超时 / 报错的那一路被跳过（降级），其他路照常
 
     # ------------------------------------------------------------------ 数据 & 权限
     sources_file: Path = Path("configs/sources.yaml")
@@ -196,8 +220,19 @@ class Settings(BaseSettings):
     photo_lookalike_margin: float = 0.03
 
     # ------------------------------------------------------------------ API 服务
-    # 为空 = 不鉴权（仅限本地开发！启动时会打印警告）
+    # 为空 = 不鉴权（仅限本地开发！启动时会打印警告）。这些 Key 可以访问任意用户组（等同可信网关）
     api_keys: list[SecretStr] = Field(default_factory=list)
+    # 按调用方分配 Key 和**允许的用户组**（最小权限）：X-User-Groups 里超出范围的组会被丢弃。
+    # 例：SERVICEKB_API_CLIENTS='[{"name":"teams-bot","key":"...","groups":["public","service"]}]'
+    api_clients: list[ApiClient] = Field(default_factory=list)
+    # 同时处理的重请求（ask / search / photo）上限（每个进程）。超过时排队最多 overload_wait_s 秒，仍拿不到就返回 503 + Retry-After，
+    # 保护 GPU / 大模型配额，避免突发流量把所有请求一起拖慢。0 = 不限制
+    max_concurrent_requests: int = 16
+    overload_wait_s: float = 5.0
+    metrics_enabled: bool = True  # GET /metrics（Prometheus 格式）。不要暴露到公网
+    # 查询日志里的问题 / 答案先脱敏（手机号、邮箱、身份证号）再落库；料号、序列号不受影响
+    query_log_redact_pii: bool = True
+    query_log_retention_days: int = 180  # servicekb db prune-logs 的默认保留天数（有反馈的记录默认保留）
     log_level: str = "INFO"
     log_json: bool = False  # 生产建议 True，方便 ELK / Loki 采集
 

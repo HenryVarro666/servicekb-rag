@@ -12,7 +12,10 @@
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -130,6 +133,30 @@ class Store(ABC):
 
     @abstractmethod
     def stats(self) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def prune_query_logs(self, older_than_days: int, keep_feedback: bool = True) -> int:
+        """删除 N 天前的查询日志（数据最小化 / 控制表大小），返回删除条数。
+        ``keep_feedback=True`` 时保留有用户反馈的记录——它们是评估集和精选问答的来源。"""
+
+    @contextmanager
+    def source_lock(self, source_id: str) -> Iterator[bool]:
+        """同一个数据源同一时间只允许一个导入任务。yield True = 拿到锁；False = 已有任务在跑，应跳过。
+
+        为什么需要：定时任务（cron / K8s CronJob）上一轮还没跑完，下一轮又启动了；或者有人手动跑了一次。
+        两个任务同时处理同一个数据源，会重复计算向量，"删除源头已不存在的文档"那一步还可能互相干扰。
+        默认实现：进程内锁（MemoryStore 够用）；PostgresStore 用数据库 advisory lock，跨进程 / 跨机器有效。
+        """
+        lock = _PROCESS_SOURCE_LOCKS.setdefault(source_id, threading.Lock())
+        acquired = lock.acquire(blocking=False)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                lock.release()
+
+
+_PROCESS_SOURCE_LOCKS: dict[str, threading.Lock] = {}
 
 
 def chunk_visible(c: Chunk, f: SearchFilters) -> bool:

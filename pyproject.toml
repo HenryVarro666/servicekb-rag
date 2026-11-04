@@ -40,6 +40,7 @@ dependencies = [
   "openai>=1.50",           # OpenAI / Azure / 任何 OpenAI 兼容服务（Gemini、DeepSeek、通义、vLLM、Ollama…）
   "pillow>=10.0",           # 图片读取 / 处理（拍照识别）
   "python-multipart>=0.0.9", # FastAPI 文件上传
+  "prometheus-client>=0.20", # 监控指标 GET /metrics（纯 Python，很小）
 ]
 
 [project.optional-dependencies]

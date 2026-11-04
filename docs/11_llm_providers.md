@@ -122,7 +122,7 @@ export SERVICEKB_LLM_FALLBACKS='[
 ]'
 ```
 
-四层兜底，从快到慢：
+四层兜底，从快到慢（另外每个厂家都有**熔断器**：连续失败 3 次后 30 秒内直接跳过它，不再每个请求都先等一次超时，见 [docs/12](12_production_hardening.md#44-大模型熔断--token-用量h6)）：
 
 1. **SDK 重试**：同一家，429 / 5xx / 网络错误自动重试 `LLM_MAX_RETRIES` 次。
 2. **Claude 服务端 fallback**（仅 Claude 官方 API）：被安全分类器拒答时，服务端自动换模型重跑，客户端无感知。
@@ -238,9 +238,9 @@ export SERVICEKB_LLM_MODEL=example-model
 ## 10. 当前不足和改进方向
 
 - **没有流式输出**：现在是等完整答案再返回。前端要"打字机效果"需要加 `complete_stream()`，API 改成 SSE。
-- **没有记录 token 用量和成本**：应该把每次调用的输入 / 输出 token 记进查询日志，按厂家统计成本。
+- ~~没有记录 token 用量和成本~~ ✅ 已完成：每次回答的 token 用量记在 `usage` 字段、查询日志和 `servicekb_llm_tokens_total` 指标里（[docs/12 §4.4](12_production_hardening.md#44-大模型熔断--token-用量h6)）。按厂家单价折算成本还需要自己配一张价格表。
 - **没有按任务路由**：目前问答和聊天抽取共用一个主模型配置（命令行可临时覆盖）。可以加"按任务 / 按问题难度选模型"，
   例如简单问题用便宜的模型、复杂故障分析用强模型。
 - **没有提示词缓存**：系统提示词是固定的，Claude / OpenAI 都支持缓存重复前缀来降低成本和延迟，量大时值得加。
-- **主备切换是"失败才切"**：没有熔断（主模型连续失败 N 次后一段时间内直接走备用）和健康检查，主模型故障期间每个请求都要先等一次超时。
+- ~~主备切换没有熔断~~ ✅ 已完成：连续失败 `LLM_CIRCUIT_FAILURES` 次后跳过该厂家 `LLM_CIRCUIT_COOLDOWN_S` 秒，冷却后放一个试探请求；拒答不计入失败。熔断状态见 `/readyz` 和 `servicekb_llm_circuit_open`。
 - **兼容接口的 JSON 只是"尽力而为"**：`json_object` 不保证符合 schema，靠校验兜底。vLLM 可以开启 guided decoding（`guided_json`）做严格约束。

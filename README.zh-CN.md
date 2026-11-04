@@ -11,6 +11,7 @@
 - 🔐 **权限与合规**：块级 ACL、PII 脱敏、证据不足自动拒答并标记升级
 - 💬 **聊天记录清洗**：Teams 导出 → 线程重建 → 问答抽取 → 人工审核分流（[详细指南](docs/09_chat_log_cleaning.md)）
 - 📷 **拍照识别备件**：现场照片 → SigLIP 外观匹配 + 标签 / 铭牌 OCR → 候选料号（长得像的会提醒）→ 交给知识库回答（[详细指南](docs/10_part_photo_recognition.md)）
+- 🛡️ **生产加固**：任何单个依赖故障都不会让问答不可用（降级矩阵）、大模型熔断、过载保护（503 + Retry-After）、按调用方限制权限的 API Key、Prometheus `/metrics` + 请求 ID、查询日志脱敏和保留期、`servicekb doctor` 上线自检、压测脚本（[评审结论与压测数据](docs/12_production_hardening.md)）
 - 🤖 **多厂家大模型**：OpenAI、Azure OpenAI、Claude（Anthropic 官方 / Bedrock / Vertex AI）、Gemini、DeepSeek、通义千问、Kimi、智谱 GLM、本地 vLLM / Ollama——改配置即可切换，主模型故障自动换备用厂家（[详细指南](docs/11_llm_providers.md)）
 - 📏 **自带评估**：检索 hit@k / MRR / nDCG + 回答关键事实召回 + 拒答准确率，CI 回归门禁
 - 🎓 **为新人而写**：每个模块开头都解释"这一步在 RAG 里是干什么的、为什么这么做"
@@ -235,9 +236,12 @@ servicekb-rag/
 │   │                               #   识别融合、拍照识别评估
 │   ├── service.py                  # 应用容器：ingest / search / ask（证据门槛、拒答、日志）
 │   ├── evaluation.py               # 评估指标与报告
-│   ├── api.py                      # FastAPI：/v1/ask /v1/search /v1/feedback /healthz /readyz
+│   ├── api.py                      # FastAPI：/v1/ask /v1/search /v1/feedback /healthz /readyz /metrics
+│   ├── metrics.py                  # Prometheus 监控指标（含告警建议）
+│   ├── doctor.py                   # 上线自检：依赖连通性 + 危险配置
 │   └── cli.py                      # 命令行
 ├── scripts/make_sample_part_images.py  # 生成虚构零件图片和现场照片
+├── scripts/loadtest.py             # 并发压测：吞吐、p50 / p95 / p99
 ├── tests/                          # 77 个测试，含 Postgres 集成测试
 ├── docs/                           # 详细文档（见下文导航）+ 示意图（docs/images，由 make_diagrams.py 生成）
 ├── Dockerfile / docker-compose.yml # 部署（含 GPU profile：TEI ×2 + vLLM）
@@ -321,6 +325,8 @@ servicekb-rag/
 
 ![Teams 聊天记录清洗漏斗](docs/images/chat_cleaning.zh.svg)
 
+**上线前**：先跑 `servicekb doctor`（每个依赖实际调用一次 + 危险配置检查，有 ✗ 时退出码 1），再用 `python scripts/loadtest.py` 在真实部署上压测，最后对照 [docs/12](docs/12_production_hardening.md#5-上线检查清单) 的上线检查清单逐项确认。
+
 **物料主数据质量检查**：`servicekb audit parts`（重复料号、相似名称、引用了不存在的料号）。
 
 **修改示意图**：改 `docs/images/make_diagrams.py` 里的文字，运行 `python docs/images/make_diagrams.py`（只用标准库，中英文两版一起重新生成）。
@@ -343,6 +349,7 @@ servicekb-rag/
 | 10 | [09 聊天记录清洗](docs/09_chat_log_cleaning.md) | 要处理 Teams / Slack / 企业微信记录 |
 | 11 | [10 拍照识别备件](docs/10_part_photo_recognition.md) | SigLIP、OCR、参考图库、长得像的零件、阈值校准 |
 | 12 | [11 多厂家大模型](docs/11_llm_providers.md) | 切换厂家、主备切换、各家接口差异、接入新厂家 |
+| 13 | [12 生产加固](docs/12_production_hardening.md) | 工程评审：并发、降级、过载、安全、监控、故障手册、上线检查清单 |
 | — | [术语表](docs/glossary.md) | 随时查 |
 
 ---
@@ -359,6 +366,7 @@ servicekb-rag/
 6. **导入是同步单进程**，大规模时需要任务队列（按页拆分 PDF、重试、进度）
 7. **SharePoint 权限没有自动同步**，目前按数据源统一配置 ACL
 8. **引用只到"块"级别**，还不能高亮到具体句子
+9. **没有流式输出；换向量模型需要停机重建；用户身份仍依赖可信网关传入**（还没有直接校验 OIDC token）——设计见 [docs/12](docs/12_production_hardening.md#6-还没做的按优先级)
 
 ---
 

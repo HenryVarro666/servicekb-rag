@@ -283,3 +283,6 @@ class AnswerResult:
     model: str = ""
     timings_ms: dict[str, float] = field(default_factory=dict)
     facts: list[str] = field(default_factory=list)  # 从对象层注入的结构化事实（例如替代件关系）
+    # 降级记录：哪些依赖失败了但请求仍然成功（例如 "dense:embedding_failed"、"generation:extractive_fallback"）
+    degraded: list[str] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)  # 大模型 token 用量：{"input_tokens", "output_tokens", "calls", "models"}

@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import uuid
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
@@ -204,7 +204,17 @@ class MemoryStore(Store):
         self.runs[run_id - 1].update(status=status, stats=stats, error=error)
 
     def log_query(self, entry: dict[str, Any]) -> None:
-        self.query_logs[str(entry["query_id"])] = entry
+        self.query_logs[str(entry["query_id"])] = {"created_at": datetime.now(timezone.utc), **entry}
+
+    def prune_query_logs(self, older_than_days: int, keep_feedback: bool = True) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        with_feedback = {f["query_id"] for f in self.feedback}
+        old = [q for q, e in self.query_logs.items()
+               if e["created_at"] < cutoff and not (keep_feedback and q in with_feedback)]
+        for q in old:
+            del self.query_logs[q]
+        self.feedback = [f for f in self.feedback if f["query_id"] in self.query_logs]
+        return len(old)
 
     def log_feedback(self, query_id: str, rating: int, comment: str | None, corrected_answer: str | None) -> bool:
         if query_id not in self.query_logs:
