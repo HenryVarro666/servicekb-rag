@@ -195,13 +195,15 @@ class ServiceKB:
         contexts = self._drop_weak_tail(r.results)
         # 结构化事实：① 问题里提到的料号（含替代件）；② 证据里提到的**停产 / 限制使用**料号。
         # ② 很重要：旧工单可能推荐了后来停产的料号，即使用户没问料号，也要提醒替代关系。
+        # 但证据被判定为"不足"（拒答）时不加 ②：那些证据和问题无关，从里面摘出来的料号事实只会误导。
+        ok, reason = self._evidence_ok(r)
         facts = self.linker.facts_for(r.analysis.expanded_ids)
-        evidence_parts = [e for c in contexts for e in c.chunk.entity_ids
-                          if e.startswith("part:") and e not in r.analysis.expanded_ids]
-        facts += self.linker.facts_for(evidence_parts, only_inactive=True)
+        if ok:
+            evidence_parts = [e for c in contexts for e in c.chunk.entity_ids
+                              if e.startswith("part:") and e not in r.analysis.expanded_ids]
+            facts += self.linker.facts_for(evidence_parts, only_inactive=True)
         facts = list(dict.fromkeys([*(extra_facts or []), *facts]))
 
-        ok, reason = self._evidence_ok(r)
         if not ok:
             answer, citations, escalate, model = (REFUSAL_EN if is_english(question) else REFUSAL_ZH), [], True, "none"
         else:

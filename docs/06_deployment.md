@@ -96,6 +96,7 @@ curl localhost:8000/readyz
 - [ ] prompt 注入：证据里的内容不会改变系统规则（prompt 规则 7）；不给 LLM 任何"执行操作"的工具权限
 - [ ] 日志里不打印完整证据和用户问题之外的敏感字段；`query_logs` 脱敏已开启（`QUERY_LOG_REDACT_PII`，默认开），并定时运行 `servicekb db prune-logs`
 - [ ] `/metrics` 只在内网可访问
+- [ ] 网页问答 `/ui` 放在网关后面：由网关完成登录、注入 `X-User-Groups` 和 API Key（页面上手填的用户组只用于本地开发 / 演示）；不需要时 `SERVICEKB_UI_ENABLED=false`
 - [ ] 容器以非 root 用户运行（Dockerfile 已处理）
 
 ## 7. 监控

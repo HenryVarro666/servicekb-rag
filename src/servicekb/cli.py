@@ -548,6 +548,9 @@ def serve(
     if s.store_backend == "memory" and workers > 1:
         console.print("[red]memory 模式不支持多 worker（每个进程各有一份数据）[/red]")
         sys.exit(1)
+    shown = "localhost" if host in ("0.0.0.0", "::") else host
+    if s.ui_enabled:
+        console.print(f"[green]网页问答：http://{shown}:{port}/ui    API 文档：http://{shown}:{port}/docs[/green]")
     uvicorn.run("servicekb.api:create_app", host=host, port=port, workers=workers, factory=True)
 
 
