@@ -10,6 +10,8 @@
     servicekb eval                      # 跑评估集
     servicekb audit parts               # 物料主数据质量报告
     servicekb chat clean --input ...    # 清洗 Teams 聊天记录
+    servicekb llm providers             # 查看支持的大模型厂家
+    servicekb llm test                  # 测试当前配置的大模型能否调通
     servicekb serve                     # 启动 HTTP API
 
 注意：``store_backend=memory`` 时每条命令都是新进程、数据不保留，所以 ask / search / eval
@@ -34,11 +36,14 @@ db_app = typer.Typer(help="数据库管理")
 audit_app = typer.Typer(help="数据质量审计")
 chat_app = typer.Typer(help="聊天记录（Teams）清洗")
 photo_app = typer.Typer(help="拍照识别备件（SigLIP / OCR），见 docs/10")
+llm_app = typer.Typer(help="大模型厂家（OpenAI / Claude / Gemini / DeepSeek / 通义 / 本地 vLLM ……），见 docs/11")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
 app.add_typer(chat_app, name="chat")
 app.add_typer(photo_app, name="photo")
+app.add_typer(llm_app, name="llm")
 console = Console()
+err_console = Console(stderr=True)  # 提示信息走 stderr，不污染 --json 的 stdout 输出
 
 
 def _settings() -> Settings:
@@ -47,13 +52,24 @@ def _settings() -> Settings:
     return s
 
 
-def _kb(auto_ingest: bool = True):
+def _override_llm(s: Settings, provider: str | None, llm_model: str | None) -> None:
+    """命令行临时换厂家 / 模型（只影响本次命令）。指定了 --provider 就不再走配置里的备用厂家。"""
+    if provider:
+        s.llm_provider, s.llm_fallbacks = provider, []
+        if not llm_model:
+            s.llm_model = None  # 不同厂家的模型名不通用，避免把 A 家的模型名发给 B 家
+    if llm_model:
+        s.llm_model = llm_model
+
+
+def _kb(auto_ingest: bool = True, provider: str | None = None, llm_model: str | None = None):
     from servicekb.service import ServiceKB
 
     s = _settings()
+    _override_llm(s, provider, llm_model)
     kb = ServiceKB(s)
     if s.store_backend == "memory" and auto_ingest:
-        console.print("[dim]（memory 模式：先自动导入 configs/sources.yaml 里的数据）[/dim]")
+        err_console.print("[dim]（memory 模式：先自动导入 configs/sources.yaml 里的数据）[/dim]")
         kb.ingest()
     return kb
 
@@ -118,13 +134,15 @@ def ask(
     groups: str | None = typer.Option(None, help="用户组，逗号分隔"),
     model: list[str] | None = typer.Option(None, help="按机型硬过滤"),
     as_json: bool = typer.Option(False, "--json", help="输出 JSON"),
+    provider: str | None = typer.Option(None, help="临时换大模型厂家，例如 anthropic / deepseek / vllm"),
+    llm_model: str | None = typer.Option(None, "--llm-model", help="临时换模型名"),
 ) -> None:
     """问答：检索 + 生成，带引用。"""
-    kb = _kb()
+    kb = _kb(provider=provider, llm_model=llm_model)
     r = kb.ask(question, _groups(groups), product_models=model)
     if as_json:
         print(json.dumps({
-            "query_id": r.query_id, "answer": r.answer, "escalate": r.escalate, "reason": r.reason,
+            "query_id": r.query_id, "answer": r.answer, "escalate": r.escalate, "reason": r.reason, "model": r.model,
             "citations": [c.__dict__ for c in r.citations], "facts": r.facts, "timings_ms": r.timings_ms,
         }, ensure_ascii=False, indent=2))
         return
@@ -276,7 +294,9 @@ def chat_clean(
     roster: Path = typer.Option(Path("data/sample/chat/roster.csv"), help="人员名册 user_id,display_name,role"),
     out_dir: Path = typer.Option(Path("data/sample/chat"), help="输出目录"),
     gap_minutes: int = typer.Option(120, help="群聊会话切分的时间间隔（分钟）"),
-    llm: bool = typer.Option(False, help="用 LLM 抽取问答（需要配置 SERVICEKB_LLM_*）"),
+    llm: bool = typer.Option(False, help="用 LLM 抽取问答（需要配置 SERVICEKB_LLM_PROVIDER 等，见 docs/11）"),
+    provider: str | None = typer.Option(None, help="临时换大模型厂家（建议用本地 vllm / ollama：聊天记录不出公司）"),
+    llm_model: str | None = typer.Option(None, "--llm-model", help="临时换模型名"),
 ) -> None:
     """Teams 聊天记录 → 清洗 → 线程 → 问答对（三路分流 + 清洗报告）。"""
     from servicekb.chat import ChatCleaner, ChatCleaningConfig, Roster, write_outputs
@@ -289,9 +309,15 @@ def chat_clean(
     extractor = None
     if llm:
         from servicekb.chat.llm_extract import LLMChatExtractor
+        from servicekb.generation.llm import build_chat_model
 
-        extractor = LLMChatExtractor(s.llm_model, s.llm_api_key.get_secret_value() if s.llm_api_key else None,
-                                     s.llm_base_url)
+        _override_llm(s, provider, llm_model)
+        # 抽取任务要"稳"：温度设为 0（不支持温度的厂家，例如 Claude，会自动忽略）
+        chat_model = build_chat_model(s, s.primary_llm_spec().model_copy(update={"temperature": 0.0}))
+        if chat_model is None:
+            console.print("[red]--llm 需要先配置大模型厂家：SERVICEKB_LLM_PROVIDER（见 servicekb llm providers）[/red]")
+            raise typer.Exit(1)
+        extractor = LLMChatExtractor(chat_model)
     cleaner = ChatCleaner(ChatCleaningConfig(session_gap_minutes=gap_minutes), Roster.from_csv(roster), kb.linker)
     pairs = cleaner.run(iter_raw_messages(input), extractor)
     paths = write_outputs(pairs, cleaner, out_dir)
@@ -393,6 +419,73 @@ def photo_eval(
 
 
 # --------------------------------------------------------------------------- 服务
+
+
+# --------------------------------------------------------------------------- 大模型厂家
+
+
+@llm_app.command("providers")
+def llm_providers() -> None:
+    """列出支持的厂家：接口类型、默认地址、API Key 环境变量、示例模型名。"""
+    import os
+
+    from rich.markup import escape
+
+    from servicekb.generation.llm import PRESETS
+
+    s = _settings()
+    t = Table(title=f"大模型厂家（当前：{s.llm_provider}）")
+    for col in ("provider", "接口", "默认地址", "API Key 环境变量", "示例模型", "说明"):
+        t.add_column(col, overflow="fold")
+    t.add_row("extractive", "-", "-", "-", "-", "不调用大模型（默认；离线 demo / 降级）")
+    for name, p in PRESETS.items():
+        key = p.key_env or "-"
+        if p.key_env:
+            key += " ✓" if os.environ.get(p.key_env) else " ✗"
+        iface = {"openai": "OpenAI 兼容", "azure": "Azure OpenAI", "anthropic": "Anthropic 原生"}[p.kind]
+        if name == "openai":
+            iface = "OpenAI 官方"
+        url = p.base_url or ("（必须填写）" if name in ("azure_openai", "openai_compatible") else "官方默认")
+        cells = (name, iface, url, key, p.example_model or "-", p.note)
+        t.add_row(*(escape(c) for c in cells))
+    console.print(t)
+    console.print("[dim]✓ = 环境变量已设置。用法：SERVICEKB_LLM_PROVIDER=deepseek SERVICEKB_LLM_MODEL=deepseek-chat "
+                  "servicekb ask \"E037 怎么处理？\"[/dim]")
+
+
+@llm_app.command("test")
+def llm_test(
+    provider: str | None = typer.Option(None, help="默认用配置里的 SERVICEKB_LLM_PROVIDER"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    json_mode: bool = typer.Option(False, "--json-mode", help="同时测试 JSON 结构化输出（chat clean --llm 要用）"),
+) -> None:
+    """发一条很短的请求，确认地址、Key、模型名都配置正确（会产生少量费用）。"""
+    import time
+
+    from servicekb.generation.llm import LLMError, build_chat_model, parse_json
+
+    s = _settings()
+    _override_llm(s, provider, llm_model)
+    try:
+        m = build_chat_model(s)
+    except (ValueError, ImportError) as e:
+        console.print(f"[red]配置有误：{e}[/red]")
+        raise typer.Exit(1) from e
+    if m is None:
+        console.print("[yellow]当前是 extractive（不调用大模型）。请设置 SERVICEKB_LLM_PROVIDER，见 servicekb llm providers[/yellow]")
+        raise typer.Exit(1)
+    try:
+        t0 = time.perf_counter()
+        out = m.complete("你是一个连通性测试助手。", "请只回复两个字：收到")
+        console.print(f"[green]✓ {m.name}[/green]  {(time.perf_counter() - t0) * 1000:.0f} ms  回复：{out.strip()[:80]}")
+        if json_mode:
+            schema = {"type": "object", "properties": {"ok": {"type": "boolean"}, "code": {"type": "string"}},
+                      "required": ["ok", "code"], "additionalProperties": False}
+            data = parse_json(m.complete("只输出 JSON。", "故障码 E037 → 返回 ok=true, code=\"E037\"", schema))
+            console.print(f"[green]✓ JSON 输出[/green] {data}")
+    except LLMError as e:
+        console.print(f"[red]✗ 调用失败：{e}[/red]")
+        raise typer.Exit(1) from e
 
 
 @app.command()

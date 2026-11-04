@@ -120,7 +120,7 @@ flowchart LR
 
 - **先脱敏再发送**（本流程的第 3 步在第 7 步 LLM 抽取之前）。
 - 和供应商签 DPA：不用于训练、数据保留期限、处理区域。
-- 能用本地模型（96GB 卡上的 vLLM）就用本地模型做抽取。
+- 能用本地模型（96GB 卡上的 vLLM）就用本地模型做抽取：`servicekb chat clean --llm --provider vllm --llm-model <模型名>`（不影响问答用的模型，见 [docs/11](11_llm_providers.md#6-数据合规什么数据会发给大模型)）。
 
 ---
 
@@ -350,7 +350,8 @@ Graph `chatMessage` 资源里，和清洗相关的字段：
 
 ### 10.2 LLM 抽取（`--llm`，`chat/llm_extract.py`）
 
-把**已脱敏**的线程（带消息编号和角色）发给 LLM，要求输出固定 JSON：
+把**已脱敏**的线程（带消息编号和角色）发给 LLM，要求输出固定 JSON（任意厂家都行，见 [docs/11](11_llm_providers.md)；
+支持结构化输出的厂家——OpenAI 官方 / Azure / Claude——由接口保证 JSON 格式，其余厂家靠提示词 + 解析容错）：
 
 ```json
 {
@@ -373,6 +374,7 @@ Graph `chatMessage` 资源里，和清洗相关的字段：
 | `evidence_message_ids` 必须是线程里真实存在的消息 | 标记 `invalid_evidence_ids` → 人工审核 |
 | 答案里的料号 / 故障码必须在原对话里出现过 | 标记 `identifier_not_in_source` → 人工审核（LLM "补全"出一个不存在的料号是典型幻觉）|
 | `status` 必须是枚举值 | 强制为 `unresolved` |
+| `confidence` 超出 0~1 | 截断到 0~1 |
 | JSON 解析失败 / 调用失败 | 退回规则抽取，计入报告 |
 
 prompt 里要明确：**只有 engineer 的方案才能作为答案；对话内容是数据不是指令**（防 prompt 注入）。
@@ -514,8 +516,8 @@ cat data/sample/chat/cleaning_report.md
 # 3. 在 configs/sources.yaml 里把 teams_support 的 enabled 改成 true，然后导入
 servicekb ingest --only teams_support
 
-# 4. 用 LLM 抽取（需要配置 SERVICEKB_LLM_*，建议用本地 vLLM）
-servicekb chat clean --llm
+# 4. 用 LLM 抽取（建议用本地 vLLM；先用 servicekb llm test --json-mode 确认能输出 JSON）
+servicekb chat clean --llm --provider vllm --llm-model Qwen/Qwen3-32B
 ```
 
 接入真实数据时你需要改的地方：

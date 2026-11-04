@@ -11,6 +11,7 @@
 - 🔐 **Access & compliance**: chunk-level ACLs, PII redaction, automatic refusal + escalation when evidence is insufficient.
 - 💬 **Chat-log cleaning**: Teams export → thread reconstruction → Q&A extraction → human-review routing ([guide](docs/09_chat_log_cleaning.md), Chinese).
 - 📷 **Part photo recognition**: site photo → SigLIP visual match + OCR of labels / nameplates → candidate part numbers with look-alike warnings → answered by the knowledge base ([guide](docs/10_part_photo_recognition.md), Chinese).
+- 🤖 **Any LLM vendor**: OpenAI, Azure OpenAI, Claude (Anthropic API / Bedrock / Vertex AI), Gemini, DeepSeek, Qwen, Kimi, GLM, local vLLM / Ollama — switch by config, automatic fallback to backup vendors ([guide](docs/11_llm_providers.md), Chinese).
 - 📏 **Built-in evaluation**: retrieval hit@k / MRR / nDCG + key-fact recall + refusal accuracy, wired into CI as a regression gate.
 - 🎓 **Written for newcomers**: every module opens with an explanation of what the step does in a RAG system and why.
 
@@ -154,7 +155,7 @@ The offline "hashing embedder" has **no semantic understanding** (for example, a
 | --- | --- | --- | --- |
 | Embeddings | `BAAI/bge-m3` (multilingual zh/en, 1024-d, 8192 tokens) | 48 GB GPU, TEI container | `EMBEDDING_BACKEND=openai` + `EMBEDDING_BASE_URL=http://gpu:8080/v1` + `EMBEDDING_DIM=1024` |
 | Reranker | `BAAI/bge-reranker-v2-m3` | 48 GB GPU, TEI container | `RERANKER_BACKEND=tei` + `RERANKER_URL=http://gpu:8081` |
-| LLM | OpenAI API, or local vLLM (a 96 GB GPU fits ~30B-class models) | 96 GB GPU / cloud | `LLM_BACKEND=openai` + `LLM_MODEL=...` (+ `LLM_BASE_URL` pointing at vLLM) |
+| LLM | Any vendor (OpenAI / Azure / Claude / Gemini / DeepSeek / Qwen …), or local vLLM (a 96 GB GPU fits ~30B-class models) | 96 GB GPU / cloud | `LLM_PROVIDER=openai\|anthropic\|deepseek\|vllm…` + `LLM_MODEL=...` — see below |
 | Image embeddings | `google/siglip-so400m-patch14-384` (1152-d), or an existing encoder service | 48 GB GPU | `IMAGE_EMBEDDING_BACKEND=siglip` (or `http` + `IMAGE_EMBEDDING_URL`), `pip install -e ".[vision]"` |
 | OCR | RapidOCR (Chinese + English, CPU) | API server | `OCR_BACKEND=rapidocr`, `pip install -e ".[ocr]"` |
 
@@ -165,6 +166,26 @@ servicekb db reset --yes && servicekb db init && servicekb ingest   # changing t
 ```
 
 All settings carry the `SERVICEKB_` prefix; the full list is in [`src/servicekb/config.py`](src/servicekb/config.py). Deployment, GPU planning and the security checklist: [docs/06_deployment.md](docs/06_deployment.md).
+
+### Choosing an LLM vendor
+
+Every vendor sits behind one small interface (`ChatModel.complete()` in [`generation/llm.py`](src/servicekb/generation/llm.py)); vendor quirks (Claude's separate `system` param and no `temperature`, Azure deployment URLs, `max_tokens` vs `max_completion_tokens`, JSON modes, refusals) are handled in the adapters.
+
+```bash
+servicekb llm providers                          # supported vendors, default URLs, which API keys are set
+
+export SERVICEKB_LLM_PROVIDER=anthropic          # or openai / azure_openai / gemini / deepseek / qwen / vllm / ...
+export ANTHROPIC_API_KEY=sk-ant-...              # each vendor's own key variable (or SERVICEKB_LLM_API_KEY)
+pip install -e ".[anthropic]"                    # Claude only: native Anthropic SDK; model defaults to claude-opus-5-5
+servicekb llm test                               # one tiny request to check URL / key / model name
+
+servicekb ask "E037 怎么处理？" --provider deepseek --llm-model deepseek-chat   # one-off override
+
+# backup vendors, tried in order when the primary errors / times out / refuses
+export SERVICEKB_LLM_FALLBACKS='[{"provider":"vllm","model":"Qwen/Qwen3-32B","base_url":"http://gpu:8000/v1"}]'
+```
+
+If every vendor fails, the answer degrades to extractive mode (`model=extractive-fallback`) instead of an error page. On the first-party Claude API, server-side fallback (re-running a refused request on another model) is on by default; set `SERVICEKB_ANTHROPIC_SERVER_FALLBACKS=false` to turn it off. Details, data-compliance notes and troubleshooting: [docs/11_llm_providers.md](docs/11_llm_providers.md).
 
 ---
 
@@ -206,6 +227,7 @@ servicekb-rag/
 │   │   └── rerank.py               #   cross-encoder / TEI reranking
 │   ├── generation/
 │   │   ├── prompts.py              #   prompts (versioned)
+│   │   ├── llm.py                  #   multi-vendor LLM adapters (OpenAI / Azure / Claude / compatible) + fallback chain
 │   │   └── generator.py            #   LLM / extractive fallback + citation validation
 │   ├── chat/                       # [chat cleaning] Teams HTML, threads, roster, Q&A extraction, routing
 │   ├── vision/                     # [part photos] image utils, SigLIP / handcrafted / HTTP embedders, OCR,
@@ -292,6 +314,8 @@ The full "symptom → which knob" table: [docs/04_retrieval_generation.md](docs/
 
 **Add reference photos for a part**: drop images into `data/sample/part_images/<part number>/` (front, side, label close-up, installed view) and run `servicekb ingest --only part_images`. Unchanged images are skipped.
 
+**Switch LLM vendor / compare vendors**: set `SERVICEKB_LLM_PROVIDER` + `SERVICEKB_LLM_MODEL`, check with `servicekb llm test`, then run `servicekb eval` per vendor and compare — see [docs/11](docs/11_llm_providers.md#7-怎么选厂家).
+
 **Clean Teams chat logs**: `servicekb chat clean` — see [docs/09_chat_log_cleaning.md](docs/09_chat_log_cleaning.md).
 
 ![Teams chat cleaning funnel](docs/images/chat_cleaning.en.svg)
@@ -319,6 +343,7 @@ The docs are in Chinese; titles translated here.
 | 9 | [08 Limitations & roadmap](docs/08_limitations_roadmap.md) | What to build next |
 | 10 | [09 Chat-log cleaning](docs/09_chat_log_cleaning.md) | Teams / Slack / WeCom exports |
 | 11 | [10 Part photo recognition](docs/10_part_photo_recognition.md) | SigLIP, OCR, reference library, look-alikes, calibration |
+| 12 | [11 LLM vendors](docs/11_llm_providers.md) | Switching vendors, fallback chains, vendor quirks, adding a vendor |
 | — | [Glossary](docs/glossary.md) | Look things up |
 
 ---

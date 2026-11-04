@@ -26,7 +26,7 @@ flowchart TB
         STORE[store/ Memory · Postgres]
         EMB[embedding.py]
         RR[retrieval/rerank.py]
-        LLM[OpenAI-compatible LLM]
+        LLM[generation/llm.py<br/>多厂家大模型 + 主备切换]
     end
     CLI & API --> SVC
     SVC --> PIPE & RET & GEN
@@ -113,7 +113,7 @@ sequenceDiagram
 | 新向量库 | `store/` | `Store` 的全部抽象方法 |
 | 新向量模型服务 | `embedding.py` | `Embedder.embed_documents()` |
 | 新检索通道 | `retrieval/retriever.py` | 在 `channels` 里加一路，RRF 自动融合 |
-| 新 LLM | `generation/generator.py` | `Generator.generate()`；OpenAI-compatible 的服务直接改配置即可 |
+| 新大模型厂家 | `generation/llm.py` | OpenAI 兼容的：`PRESETS` 加一行（或直接用 `openai_compatible`）；其他：`ChatModel.complete()`，见 [docs/11](11_llm_providers.md#8-接入一个新厂家) |
 | 新图像模型 / 图像编码服务 | `vision/embedders.py` | `ImageEmbedder.embed_images()`；已有 SigLIP / 手工特征 / HTTP 三种 |
 | 新 OCR 引擎（含条码） | `vision/ocr.py` | `OCREngine.read()`（能给文字框的再实现 `read_with_boxes()`） |
 
