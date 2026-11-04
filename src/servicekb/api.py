@@ -22,6 +22,12 @@
   如果直接在 ``async def`` 里调用，会卡住整个事件循环，连 /healthz 都没法响应。
 - **依赖故障**：数据库不可用时返回 503（可重试），而不是 500。
 - **监控**：``GET /metrics``（Prometheus 格式）。不要暴露到公网。
+
+网页问答（``/ui``）
+-------------------
+``src/servicekb/web/`` 下的静态页面（纯 HTML / CSS / JS，没有构建步骤），只调用上面这些 API。
+页面响应带严格的 Content-Security-Policy（只允许加载本站的脚本 / 样式），即使证据里夹带了恶意内容也无法执行脚本。
+页面上填写的"用户组"只在本地开发 / 演示时生效；生产环境必须由网关根据登录身份设置 ``X-User-Groups``。
 """
 
 from __future__ import annotations
@@ -34,10 +40,12 @@ import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -52,6 +60,15 @@ log = get_logger(__name__)
 
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")  # 调用方传入的 ID 只接受安全字符，防止日志注入
 _QUIET_PATHS = {"/healthz", "/readyz", "/metrics"}  # 探针 / 抓取请求太频繁，不写访问日志
+WEB_DIR = Path(__file__).parent / "web"
+# 网页的安全响应头：只允许加载本站资源；照片预览用 blob: 地址；禁止被其他网站嵌入（点击劫持）
+_UI_HEADERS = [
+    (b"content-security-policy", b"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; "
+     b"connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"x-frame-options", b"DENY"),
+]
 
 
 # --------------------------------------------------------------------------- 请求 / 响应模型
@@ -215,12 +232,17 @@ def create_app(settings: Settings | None = None, kb: ServiceKB | None = None) ->
         token = request_id_var.set(rid)
         t0 = time.perf_counter()
         status = 500
+        path = scope.get("path", "")
+        is_ui = path == "/ui" or path.startswith("/ui/")
 
         async def send_wrapper(message: dict[str, Any]) -> None:
             nonlocal status
             if message["type"] == "http.response.start":
                 status = message["status"]
-                message.setdefault("headers", []).append((b"x-request-id", rid.encode()))
+                headers = message.setdefault("headers", [])
+                headers.append((b"x-request-id", rid.encode()))
+                if is_ui:
+                    headers.extend(_UI_HEADERS)
             await send(message)
 
         try:
@@ -228,7 +250,7 @@ def create_app(settings: Settings | None = None, kb: ServiceKB | None = None) ->
         finally:
             dt = time.perf_counter() - t0
             # 用路由模板（/v1/ask）而不是实际路径做标签，避免指标基数爆炸
-            route = getattr(scope.get("route"), "path", "unmatched")
+            route = getattr(scope.get("route"), "path", None) or ("/ui" if is_ui else "unmatched")
             method = scope.get("method", "")
             metrics.HTTP_REQUESTS.labels(method, route, str(status)).inc()
             metrics.HTTP_LATENCY.labels(method, route).observe(dt)
@@ -371,6 +393,20 @@ def create_app(settings: Settings | None = None, kb: ServiceKB | None = None) ->
     @app.get("/v1/stats", dependencies=[Depends(auth)])
     def stats(k: ServiceKB = Depends(get_kb)) -> dict[str, Any]:
         return k.store.stats()
+
+    # ------------------------------------------------------------------ 网页问答
+    if s.ui_enabled:
+        @app.get("/", include_in_schema=False)
+        def root() -> RedirectResponse:
+            return RedirectResponse("ui/")  # 相对地址：部署在网关子路径下也能跳对
+
+        @app.get("/ui/config", include_in_schema=False)
+        def ui_config() -> dict[str, Any]:
+            """页面启动时读取：是否需要填写 API Key。不返回任何敏感信息。"""
+            return {"auth_required": bool(callers), "version": app.version, "max_upload_mb": max_upload // (1024 * 1024)}
+
+        # 必须放在所有 /ui/... 路由之后：Mount 会接管 /ui 下的其余路径
+        app.mount("/ui", StaticFiles(directory=WEB_DIR, html=True), name="ui")
 
     # 把中间件装在最外层：FastAPI 的异常处理、路由都在它里面，所以能拿到最终状态码和匹配到的路由
     inner_app = app.build_middleware_stack()

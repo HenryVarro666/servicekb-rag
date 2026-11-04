@@ -78,9 +78,25 @@ servicekb eval                                  # 跑评估集
 servicekb chat clean                            # 清洗示例 Teams 聊天记录
 servicekb photo ask data/sample/photos/site_310-04521-A_label.jpg "怎么更换？"   # 照片 → 料号 → 知识库回答
 servicekb photo eval                            # 拍照识别评估
-servicekb serve                                 # 启动 HTTP API → http://localhost:8000/docs
+servicekb serve                                 # 启动 HTTP API → http://localhost:8000/docs，网页问答 → http://localhost:8000/ui
 pytest                                          # 跑测试
 ```
+
+### 网页问答（不用命令行）
+
+```bash
+servicekb serve
+```
+
+浏览器打开 <http://localhost:8000/ui>（打开根地址也会自动跳转）。不会用命令行的同事也能直接上手：输入问题或点示例问题，看到带**可点击引用**的回答、料号状态 / 替代关系、"证据不足已升级"的提示；可以上传照片识别备件；
+回答不对时点 👍 / 👎 或"纠正答案"——专家的修正会存进反馈表，是建评估集的原材料。手机上也能用，支持暗色模式。
+
+![servicekb 网页问答](docs/images/web_ui.webp)
+
+页面在 [`src/servicekb/web/`](src/servicekb/web/)，是纯 HTML / CSS / JS（没有构建步骤，改完刷新浏览器即可），只调用现有的 HTTP API；
+响应带严格的 Content-Security-Policy，服务端返回的所有文字都按纯文本显示，证据里夹带的恶意内容无法执行。
+**安全提醒**：页面"设置"里填的用户组只在本地开发 / 演示时生效；试点 / 生产环境要把页面放在网关后面，由网关根据登录身份设置 `X-User-Groups`。
+不需要网页时设置 `SERVICEKB_UI_ENABLED=false`。
 
 ---
 
@@ -239,6 +255,7 @@ servicekb-rag/
 │   ├── api.py                      # FastAPI：/v1/ask /v1/search /v1/feedback /healthz /readyz /metrics
 │   ├── metrics.py                  # Prometheus 监控指标（含告警建议）
 │   ├── doctor.py                   # 上线自检：依赖连通性 + 危险配置
+│   ├── web/                        # 网页问答 /ui：index.html + app.js + style.css（没有构建步骤）
 │   └── cli.py                      # 命令行
 ├── scripts/make_sample_part_images.py  # 生成虚构零件图片和现场照片
 ├── scripts/loadtest.py             # 并发压测：吞吐、p50 / p95 / p99

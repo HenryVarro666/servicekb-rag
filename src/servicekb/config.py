@@ -230,6 +230,8 @@ class Settings(BaseSettings):
     max_concurrent_requests: int = 16
     overload_wait_s: float = 5.0
     metrics_enabled: bool = True  # GET /metrics（Prometheus 格式）。不要暴露到公网
+    # 网页问答 /ui（静态页面，调用上面这些 API）。生产环境放在网关后面，由网关负责登录和设置用户组
+    ui_enabled: bool = True
     # 查询日志里的问题 / 答案先脱敏（手机号、邮箱、身份证号）再落库；料号、序列号不受影响
     query_log_redact_pii: bool = True
     query_log_retention_days: int = 180  # servicekb db prune-logs 的默认保留天数（有反馈的记录默认保留）

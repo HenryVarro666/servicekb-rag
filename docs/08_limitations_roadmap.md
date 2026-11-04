@@ -58,7 +58,7 @@
 | E1 | API 鉴权只有 API Key（已支持按调用方限制用户组）；用户身份依赖网关传入 | **P0（P0-4：直接校验 OIDC JWT）** |
 | E2 | ~~没有 Prometheus 指标~~ ✅ 已有 `/metrics` + 请求 ID（[docs/12](12_production_hardening.md)）；还没有 OpenTelemetry 链路追踪 | P1（P1-5：OTel + Langfuse / Opik）|
 | E3 | Docker / GPU 配置未在真实 GPU 环境验证 | P0 |
-| E4 | 没有前端 | P1（Teams 机器人或简单 Web 页面）|
+| E4 | ~~没有前端~~ ✅ 已有网页问答 `/ui`（演示 / 试点：提问、引用、拍照、反馈）；面向现场工程师的 Teams 机器人仍待做 | P1（Teams 机器人；多轮对话 P1-4 依赖它）|
 | E5 | 评估集只有 18 道虚构题：答对 15 道时 95% 置信区间约 61%–94%，只能发现灾难性回归 | **P0（P0-1：200–500 题真实分层评估集，含危险作业层和真实照片层）** |
 | E6 | 没有流式输出、换向量模型需要停机重建、用户身份依赖网关传入（详见 [docs/12 §6](12_production_hardening.md#6-还没做的按优先级)） | P0 / P1 |
 | E7 | 压测只在示例数据 + 单机上做过；真实 GPU 部署下的容量（p95、最大吞吐）未知 | P0（用 `scripts/loadtest.py` 在真实部署上测）|

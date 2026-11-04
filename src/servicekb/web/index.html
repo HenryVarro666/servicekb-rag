@@ -1,0 +1,116 @@
+<!doctype html>
+<!--
+  servicekb 网页问答（/ui）
+
+  - 纯 HTML + CSS + 原生 JavaScript，没有构建步骤：改完刷新浏览器就能看到效果。
+  - 只调用现有的 HTTP API：/v1/ask、/v1/photo/ask、/v1/feedback、/readyz（和命令行、其他调用方完全一致）。
+  - 所有服务端返回的文字都按"纯文本"插入页面（不用 innerHTML），证据里即使有恶意内容也不会被当成代码执行。
+  - 安全提醒：生产环境里"用户组"必须由网关根据登录身份设置，页面上填写的用户组只在本地开发 / 演示时生效。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>servicekb 售后知识库</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">KB</span>
+      <div>
+        <div class="brand-name">servicekb 售后知识库</div>
+        <div class="brand-sub">回答带引用 · 证据不足会拒答并升级 · 支持拍照识别备件</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="status" class="status status-unknown" title="服务状态"><span id="status-text">连接中…</span><span id="status-detail" class="status-detail"></span></span>
+      <button id="open-settings" class="icon-btn" type="button" aria-label="设置">设置</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <noscript><p class="notice notice-error">这个页面需要启用 JavaScript。</p></noscript>
+
+    <!-- 提问区 -->
+    <form id="ask-form" class="card ask" autocomplete="off">
+      <label for="question" class="sr-only">问题</label>
+      <textarea id="question" rows="3" maxlength="2000"
+        placeholder="描述问题：型号 + 故障码 + 现象，例如 AS-110K-HV 早上报 E037 怎么处理？"></textarea>
+      <p class="hint desktop-only">Enter 发送 · Shift+Enter 换行 · 可以直接粘贴或拖入照片</p>
+
+      <div id="photo-preview" class="photo-preview" hidden>
+        <img id="photo-thumb" alt="已选择的照片">
+        <div class="photo-meta">
+          <span id="photo-name"></span>
+          <button id="photo-remove" type="button" class="link-btn">移除照片</button>
+        </div>
+      </div>
+
+      <details id="filters" class="filters">
+        <summary>筛选（可选）</summary>
+        <div class="filters-body">
+          <label class="field">
+            <span>机型</span>
+            <input id="filter-model" type="text" maxlength="64" placeholder="例如 AS-110K-HV（只看这个机型的资料）">
+          </label>
+          <fieldset class="field">
+            <legend>资料类型</legend>
+            <div id="filter-types" class="checks"></div>
+          </fieldset>
+          <p class="hint">带照片提问时不使用筛选条件。</p>
+        </div>
+      </details>
+
+      <div class="ask-actions">
+        <label class="btn btn-secondary file-btn">
+          <input id="photo-input" type="file" accept="image/*" capture="environment">
+          添加照片
+        </label>
+        <button id="ask-btn" class="btn btn-primary" type="submit">提问</button>
+      </div>
+
+      <div class="examples" id="examples" aria-label="示例问题"></div>
+    </form>
+
+    <!-- 回答区：最新的在最上面 -->
+    <section id="results" aria-live="polite"></section>
+
+    <section id="welcome" class="card welcome">
+      <h2>可以问什么？</h2>
+      <ul>
+        <li><b>故障处理</b>：型号 + 故障码 + 现象，例如"AS-110K-HV 早上报 E037 怎么处理"。</li>
+        <li><b>备件</b>：料号状态、替代料号，例如"310-04521-B 停产了吗？用什么替代"。</li>
+        <li><b>拍照识别</b>：点"添加照片"拍零件或铭牌，系统先识别料号，再用知识库回答。</li>
+      </ul>
+      <p class="hint">每个回答都标注了来源 <span class="cite-demo">1</span>，点开可以核对原文。知识库里没有依据时，系统会直接说明并标记"需升级"，而不是编一个答案。
+        回答不对时请点"没用"或"纠正答案"——专家的修正会用来改进知识库。每个问题独立回答，暂不支持连续追问。</p>
+    </section>
+  </main>
+
+  <!-- 设置 -->
+  <dialog id="settings" class="dialog">
+    <form method="dialog" id="settings-form">
+      <h2>设置</h2>
+      <label class="field">
+        <span>API Key</span>
+        <input id="api-key" type="password" autocomplete="off" placeholder="服务开启了鉴权时填写">
+      </label>
+      <p class="hint" id="auth-hint"></p>
+      <label class="field">
+        <span>用户组（逗号分隔）</span>
+        <input id="user-groups" type="text" placeholder="public,service">
+      </label>
+      <p class="hint">用户组决定能看到哪些资料。<b>生产环境中由网关根据登录身份设置</b>，这里填写的只在本地开发 / 演示时生效。
+        API Key 只保存在当前浏览器标签页里（关闭即清除）。</p>
+      <div class="dialog-actions">
+        <button value="cancel" class="btn btn-secondary" type="submit">取消</button>
+        <button value="save" id="settings-save" class="btn btn-primary" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="./app.js"></script>
+</body>
+</html>

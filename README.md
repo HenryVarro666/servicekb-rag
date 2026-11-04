@@ -81,9 +81,21 @@ servicekb eval                                  # run the evaluation set
 servicekb chat clean                            # clean the sample Teams export
 servicekb photo ask data/sample/photos/site_310-04521-A_label.jpg "怎么更换？"   # photo → part → KB answer
 servicekb photo eval                            # photo-recognition evaluation
-servicekb serve                                 # HTTP API → http://localhost:8000/docs
+servicekb serve                                 # HTTP API → http://localhost:8000/docs, web UI → http://localhost:8000/ui
 pytest                                          # tests
 ```
+
+### Web UI (no command line needed)
+
+```bash
+servicekb serve
+```
+
+Open <http://localhost:8000/ui> (the root URL redirects there). Anyone can try the system in a browser: type a question or click an example, see the answer with clickable citations, part status / substitutes, refusal-and-escalation notices, upload a photo to identify a part, and mark answers 👍 / 👎 or submit an expert correction (stored as feedback — raw material for the evaluation set). It works on phones and in dark mode. The page itself is in Chinese.
+
+![servicekb web UI](docs/images/web_ui.webp)
+
+It is a plain HTML / CSS / JS page in [`src/servicekb/web/`](src/servicekb/web/) (no build step) that only calls the existing HTTP API, with a strict Content-Security-Policy and text-only rendering of everything the server returns. **Security:** the "user groups" field on the page only applies in local development / demos; in a pilot or production, put the page behind your gateway, which sets `X-User-Groups` from the user's login. Turn it off with `SERVICEKB_UI_ENABLED=false`.
 
 ---
 
@@ -238,6 +250,7 @@ servicekb-rag/
 │   ├── api.py                      # FastAPI: /v1/ask /v1/search /v1/feedback /healthz /readyz /metrics
 │   ├── metrics.py                  # Prometheus metrics (+ suggested alerts)
 │   ├── doctor.py                   # preflight checks: dependencies + risky config
+│   ├── web/                        # web UI at /ui: index.html + app.js + style.css (no build step)
 │   └── cli.py                      # command line
 ├── scripts/make_sample_part_images.py  # draws the fictional part images and site photos
 ├── scripts/loadtest.py             # concurrent load test: RPS, p50 / p95 / p99
