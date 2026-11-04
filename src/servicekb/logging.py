@@ -12,9 +12,22 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from contextvars import ContextVar
 from datetime import datetime, timezone
 
 _RESERVED = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {"message", "asctime"}
+
+# 当前 HTTP 请求的 ID（API 中间件设置）。同一个请求的所有日志都带上它，排查时 grep 一个 ID 就能串起整条链路；
+# 也会写进 query_logs，并通过响应头 X-Request-ID 返回给调用方（用户报障时让对方提供这个 ID）。
+request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
+
+
+class _RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        rid = request_id_var.get()
+        if rid and not hasattr(record, "request_id"):
+            record.request_id = rid
+        return True
 
 
 class _JsonFormatter(logging.Formatter):
@@ -40,6 +53,7 @@ class _TextFormatter(logging.Formatter):
 
 def setup_logging(level: str = "INFO", json_format: bool = False) -> None:
     handler = logging.StreamHandler(sys.stderr)
+    handler.addFilter(_RequestIdFilter())
     handler.setFormatter(
         _JsonFormatter() if json_format else _TextFormatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     )

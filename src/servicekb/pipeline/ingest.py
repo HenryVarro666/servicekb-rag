@@ -259,6 +259,14 @@ class IngestionPipeline:
 
     # ------------------------------------------------------------------ 主流程
     def run(self, connector: Connector, *, force_delete: bool = False) -> IngestReport:
+        # 同一个数据源同时只跑一个导入任务（定时任务重叠、手动补跑时会发生）
+        with self.store.source_lock(connector.source_id) as acquired:
+            if not acquired:
+                log.warning("another ingestion run holds the lock, skipping", extra={"source": connector.source_id})
+                return IngestReport(source_id=connector.source_id, status="skipped_locked")
+            return self._run_locked(connector, force_delete=force_delete)
+
+    def _run_locked(self, connector: Connector, *, force_delete: bool = False) -> IngestReport:
         t0 = time.perf_counter()
         source_id = connector.source_id
         report = IngestReport(source_id=source_id)

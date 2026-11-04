@@ -54,8 +54,13 @@ docker compose up -d db api        # 数据库 + API
 docker compose --profile gpu up -d # GPU 服务
 docker compose run --rm api servicekb db init
 docker compose run --rm api servicekb ingest
+docker compose run --rm api servicekb doctor   # 上线前自检：依赖连通性 + 危险配置
 curl localhost:8000/readyz
 ```
+
+**进程数与并发**：API 进程受 Python GIL 限制，CPU 密集时单进程只能用一个核（实测 4 核机器上 1 → 4 个进程，吞吐 86 → 245 req/s）。
+单机部署设 `WEB_CONCURRENCY=<CPU 核数>`；K8s 部署每个 Pod 1 个进程，靠副本数扩容。
+并发上限、召回线程池、数据库连接池三个参数要一起配，见 [docs/12 §4.1](12_production_hardening.md#41-并发线程池--连接池--进程数h1h2)。
 
 镜像版本已固定（`pgvector/pgvector:pg16`、`text-embeddings-inference:1.6`、`vllm-openai:v0.8.5`），升级前在测试环境验证。
 
@@ -70,7 +75,8 @@ curl localhost:8000/readyz
 17 2 * * * cd /opt/servicekb && docker compose run --rm api servicekb ingest >> /var/log/servicekb-ingest.log 2>&1
 ```
 
-- 同一个数据源不要并发导入。
+- 同一个数据源不会并发导入：导入前会拿数据库锁，拿不到就跳过（状态 `skipped_locked`）。K8s CronJob 仍建议设置 `concurrencyPolicy: Forbid`。
+- 查询日志清理也放进定时任务：`servicekb db prune-logs`（默认删除 180 天前、没有用户反馈的日志）。
 - `ingest` 有失败文档时返回状态 `partial`（退出码 0），整体失败返回非零——监控退出码和 `ingestion_runs.status`。
 
 ## 5. 配置与密钥
@@ -80,17 +86,25 @@ curl localhost:8000/readyz
 
 ## 6. 安全清单
 
-- [ ] `SERVICEKB_API_KEYS` 已设置（为空时 API 不鉴权，启动日志会告警）
+- [ ] `SERVICEKB_API_KEYS`（可信网关）/ `SERVICEKB_API_CLIENTS`（其他调用方，限制可访问的用户组）已设置（都为空时 API 不鉴权，启动日志会告警）
+- [ ] `servicekb doctor` 没有 ✗（完整的上线检查清单见 [docs/12 §5](12_production_hardening.md#5-上线检查清单)）
 - [ ] `X-User-Groups` 只由网关在用户登录后设置；外部请求带的这个头要在网关剥离
 - [ ] 数据库不暴露公网；改掉默认密码；应用用最小权限账号
 - [ ] 每个数据源的 `acl_groups` 经过业务确认（尤其是服务通告、工单这类内部资料）
 - [ ] 入库前 PII 脱敏已开启；抽样检查过
 - [ ] 发给外部 LLM 的内容经过法务评估（数据出境、DPA、不用于训练）
 - [ ] prompt 注入：证据里的内容不会改变系统规则（prompt 规则 7）；不给 LLM 任何"执行操作"的工具权限
-- [ ] 日志里不打印完整证据和用户问题之外的敏感字段；`query_logs` 有保留期限
+- [ ] 日志里不打印完整证据和用户问题之外的敏感字段；`query_logs` 脱敏已开启（`QUERY_LOG_REDACT_PII`，默认开），并定时运行 `servicekb db prune-logs`
+- [ ] `/metrics` 只在内网可访问
 - [ ] 容器以非 root 用户运行（Dockerfile 已处理）
 
 ## 7. 监控
+
+**实时指标**：`GET /metrics`（Prometheus），包括 HTTP 延迟 / 错误率、问答各阶段耗时、拒答率、降级次数、
+大模型调用结果 / 熔断状态 / token 用量、过载拒绝数。指标清单和告警规则见 [docs/12 §4.8](12_production_hardening.md#48-可观测性h11)。
+每个请求都有 `X-Request-ID`（响应头 + 日志 + 查询日志），排查时按它串起整条链路。
+
+**离线分析**（查询日志 / 反馈表）：
 
 | 指标 | 来源 | 告警建议 |
 | --- | --- | --- |
@@ -100,7 +114,9 @@ curl localhost:8000/readyz
 | 无引用回答比例 | `query_logs.citations` 为空且未拒答 | > 5% |
 | 导入失败数 | `ingestion_runs` / `documents.status='failed'` | 任何整体失败；失败文档数持续增加 |
 | 数据新鲜度 | `max(indexed_at)` per source | 超过 2 天没更新 |
-| 降级次数 | 日志 `falling back` | 出现即关注 |
+| 降级次数 | `servicekb_degraded_total`；查询日志 `degraded` 字段 | 增速突增即关注 |
+| 拒答原因分布 | `query_logs.reason`（SQL 见 docs/12 §4.9） | 某类原因突增 |
+| 大模型成本 | `query_logs.usage` / `servicekb_llm_tokens_total` | 按厂家单价折算，超预算告警 |
 
 生产建议 `SERVICEKB_LOG_JSON=true`，日志输出为 JSON，方便 ELK / Loki 采集。
 

@@ -21,15 +21,18 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from servicekb import metrics
 from servicekb.config import Settings, get_settings
 from servicekb.connectors import build_connector, load_sources
 from servicekb.embedding import build_embedder
-from servicekb.generation.generator import build_generator, extract_citations
+from servicekb.generation.generator import LLMGenerator, build_generator, extract_citations
+from servicekb.generation.llm import circuit_states, summarize_usage, track_usage
 from servicekb.generation.prompts import PROMPT_VERSION, REFUSAL_EN, REFUSAL_ZH
-from servicekb.logging import get_logger
+from servicekb.logging import get_logger, request_id_var
 from servicekb.models import AnswerResult, DocType, ScoredChunk, SearchFilters
 from servicekb.pipeline.ingest import IngestionPipeline, IngestReport
 from servicekb.processing.chunking import ChunkingConfig
+from servicekb.processing.cleaning import redact_pii
 from servicekb.processing.entities import EntityLinker, canonical_tokens
 from servicekb.processing.text import tokenize
 from servicekb.retrieval.rerank import build_reranker
@@ -89,10 +92,18 @@ class ServiceKB:
             rrf_k=s.rrf_k,
             weights={"dense": s.weight_dense, "keyword": s.weight_keyword, "entity": s.weight_entity},
             rerank_candidates=s.reranker_candidates, near_dup_hamming=s.near_dup_hamming,
+            max_workers=s.retrieval_max_workers, channel_timeout_s=s.retrieval_channel_timeout_s,
         )
 
     def close(self) -> None:
+        self.retriever.close()
+        if hasattr(self.reranker, "close"):
+            self.reranker.close()
         self.store.close()
+
+    def llm_status(self) -> dict[str, str]:
+        """每个大模型厂家的熔断状态（closed / open / half_open）；extractive 模式为空。"""
+        return circuit_states(self.generator.chat_model) if isinstance(self.generator, LLMGenerator) else {}
 
     # ------------------------------------------------------------------ 导入
     def ingest(
@@ -168,13 +179,19 @@ class ServiceKB:
         log_query: bool = True,
         extra_entities: list[str] | None = None,
         extra_facts: list[str] | None = None,
+        client: str | None = None,
     ) -> AnswerResult:
-        """``extra_entities`` / ``extra_facts``：问题文字之外的已知信息（例如拍照识别的结果），一起参与检索和生成。"""
+        """``extra_entities`` / ``extra_facts``：问题文字之外的已知信息（例如拍照识别的结果），一起参与检索和生成。
+
+        ``client``：调用方名字（API 鉴权时确定），写进查询日志，用于按调用方统计 / 审计。
+        """
         t0 = time.perf_counter()
         query_id = str(uuid.uuid4())
         groups = list(user_groups or self.settings.default_user_groups)
         r = self.search(question, groups, doc_types, product_models, extra_entities=extra_entities)
         timings = dict(r.timings_ms)
+        degraded = list(r.degraded)
+        usage: dict[str, Any] = {}
         contexts = self._drop_weak_tail(r.results)
         # 结构化事实：① 问题里提到的料号（含替代件）；② 证据里提到的**停产 / 限制使用**料号。
         # ② 很重要：旧工单可能推荐了后来停产的料号，即使用户没问料号，也要提醒替代关系。
@@ -189,14 +206,17 @@ class ServiceKB:
             answer, citations, escalate, model = (REFUSAL_EN if is_english(question) else REFUSAL_ZH), [], True, "none"
         else:
             t = time.perf_counter()
-            try:
-                raw = self.generator.generate(question, contexts, facts)
-                model = self.generator.name
-            except Exception as e:  # LLM 服务故障 → 降级为抽取式回答，而不是直接报错
-                log.exception("generation failed, falling back to extractive")
-                from servicekb.generation.generator import ExtractiveGenerator
+            with track_usage() as calls:  # 记录 token 用量（含失败重试 / 切换备用厂家的调用）
+                try:
+                    raw = self.generator.generate(question, contexts, facts)
+                    model = self.generator.name
+                except Exception as e:  # LLM 服务故障 → 降级为抽取式回答，而不是直接报错
+                    log.exception("generation failed, falling back to extractive")
+                    from servicekb.generation.generator import ExtractiveGenerator
 
-                raw, model, reason = ExtractiveGenerator().generate(question, contexts, facts), "extractive-fallback", f"llm_error:{e!r}"
+                    raw, model, reason = ExtractiveGenerator().generate(question, contexts, facts), "extractive-fallback", f"llm_error:{e!r}"
+                    degraded.append("generation:extractive_fallback")
+            usage = summarize_usage(calls)
             timings["generate"] = (time.perf_counter() - t) * 1000
             answer, citations = extract_citations(raw, contexts)
             escalate = "没有找到相关依据" in answer or "does not contain enough" in answer
@@ -207,13 +227,14 @@ class ServiceKB:
         result = AnswerResult(
             query_id=query_id, question=question, answer=answer, citations=citations, retrieved=contexts,
             escalate=escalate, reason=reason, model=model, timings_ms={k: round(v, 1) for k, v in timings.items()},
-            facts=facts,
+            facts=facts, degraded=degraded, usage=usage,
         )
+        metrics.observe_answer(result)
         if log_query:
             log_filters: dict[str, Any] = {"doc_types": doc_types, "product_models": product_models}
             if extra_entities:
                 log_filters["hint_entities"] = extra_entities
-            self._log(result, groups, log_filters)
+            self._log(result, groups, log_filters, client)
         return result
 
     # ------------------------------------------------------------------ 拍照识别
@@ -236,26 +257,31 @@ class ServiceKB:
         return self.identifier.identify(image, list(user_groups or self.settings.default_user_groups), top_k)
 
     def ask_with_photo(self, image: Any, question: str | None = None, user_groups: list[str] | None = None,
-                       log_query: bool = True) -> tuple[Any, AnswerResult]:
+                       log_query: bool = True, client: str | None = None) -> tuple[Any, AnswerResult]:
         """照片 + （可选）问题 → 先识别零件，再把识别结果作为已知对象交给知识库回答。"""
         groups = list(user_groups or self.settings.default_user_groups)
         ident = self.identify_photo(image, groups)
         q = (question or "").strip() or "这是什么零件？现在的状态是什么，怎么更换？"
         facts = [f"照片识别：{w}" for w in ident.warnings] + ident.facts
-        answer = self.ask(q, groups, log_query=log_query, extra_entities=ident.hint_entities(), extra_facts=facts)
+        answer = self.ask(q, groups, log_query=log_query, extra_entities=ident.hint_entities(), extra_facts=facts,
+                          client=client)
         return ident, answer
 
-    def _log(self, r: AnswerResult, groups: list[str], filters: dict[str, Any]) -> None:
+    def _log(self, r: AnswerResult, groups: list[str], filters: dict[str, Any], client: str | None = None) -> None:
+        # 查询日志会长期保存、很多人能看：先脱敏（手机号 / 邮箱 / 身份证号），料号和序列号不受影响
+        redact = redact_pii if self.settings.query_log_redact_pii else (lambda x: x)
         try:
             self.store.log_query({
-                "query_id": r.query_id, "question": r.question, "user_groups": groups, "filters": filters,
+                "query_id": r.query_id, "question": redact(r.question), "user_groups": groups, "filters": filters,
                 "retrieved": [
                     {"chunk_id": c.chunk.chunk_id, "doc_ref": c.chunk.doc_ref, "score": round(c.score, 5),
                      "rerank": c.rerank_score, "ranks": c.channel_ranks} for c in r.retrieved
                 ],
-                "answer": r.answer,
+                "answer": redact(r.answer),
                 "citations": [{"index": c.index, "chunk_id": c.chunk_id, "doc_ref": c.doc_ref} for c in r.citations],
                 "escalate": r.escalate, "model": r.model, "prompt_version": PROMPT_VERSION, "timings_ms": r.timings_ms,
+                "reason": r.reason, "degraded": r.degraded, "usage": r.usage, "request_id": request_id_var.get(),
+                "client": client,
             })
         except Exception:  # 日志失败不能影响回答
             log.exception("failed to log query")

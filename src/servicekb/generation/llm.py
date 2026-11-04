@@ -32,10 +32,14 @@ import json
 import os
 import re
 import threading
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from servicekb import metrics
 from servicekb.config import LLMSpec, Settings
 from servicekb.logging import get_logger
 
@@ -44,6 +48,53 @@ log = get_logger(__name__)
 
 class LLMError(RuntimeError):
     """调用失败（网络、限流、鉴权、拒答、输出被截断……）。上层据此切换备用厂家或降级为抽取式回答。"""
+
+
+class LLMRefusalError(LLMError):
+    """模型 / 安全过滤**拒绝回答这个请求**。和"服务故障"不同：它说明服务是好的，只是这条内容不行，
+    所以不计入熔断失败次数（否则几个敏感问题就能让所有人都用不了这家）。"""
+
+
+# --------------------------------------------------------------------------- token 用量
+
+_usage_tls = threading.local()
+
+
+def record_usage(model_name: str, input_tokens: int | None, output_tokens: int | None) -> None:
+    """adapter 每次调用完成后调用：累计到当前线程的 ``track_usage()`` 里，并记入监控指标。"""
+    i, o = int(input_tokens or 0), int(output_tokens or 0)
+    metrics.LLM_TOKENS.labels(model_name, "input").inc(i)
+    metrics.LLM_TOKENS.labels(model_name, "output").inc(o)
+    calls = getattr(_usage_tls, "calls", None)
+    if calls is not None:
+        calls.append({"model": model_name, "input_tokens": i, "output_tokens": o})
+
+
+@contextmanager
+def track_usage() -> Iterator[list[dict[str, Any]]]:
+    """收集这段代码里所有大模型调用的 token 用量（含失败后切换备用厂家的那几次——它们也要花钱）::
+
+        with track_usage() as calls:
+            answer = chat_model.complete(...)
+        summary = summarize_usage(calls)   # {"input_tokens": 1834, "output_tokens": 412, "calls": 1, ...}
+    """
+    prev = getattr(_usage_tls, "calls", None)
+    _usage_tls.calls = calls = []
+    try:
+        yield calls
+    finally:
+        _usage_tls.calls = prev
+
+
+def summarize_usage(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    if not calls:
+        return {}
+    return {
+        "input_tokens": sum(c["input_tokens"] for c in calls),
+        "output_tokens": sum(c["output_tokens"] for c in calls),
+        "calls": len(calls),
+        "models": list(dict.fromkeys(c["model"] for c in calls)),
+    }
 
 
 # --------------------------------------------------------------------------- 厂家预设
@@ -165,8 +216,12 @@ class OpenAIChatModel(ChatModel):
             resp = self.client.chat.completions.create(**kwargs)
         except self._errors as e:
             raise LLMError(f"{self.name}: {e.__class__.__name__}: {e}") from e
+        u = getattr(resp, "usage", None)
+        record_usage(self.name, getattr(u, "prompt_tokens", 0), getattr(u, "completion_tokens", 0))
         choice = resp.choices[0]
         text = choice.message.content or ""
+        if choice.finish_reason == "content_filter" or getattr(choice.message, "refusal", None):
+            raise LLMRefusalError(f"{self.name}: refused (finish_reason={choice.finish_reason})")
         if not text.strip():
             raise LLMError(f"{self.name}: empty response (finish_reason={choice.finish_reason})")
         return text
@@ -252,10 +307,12 @@ class AnthropicChatModel(ChatModel):
             raise LLMError(f"{self.name}: connection error: {e}") from e
 
         self._local.served_model = getattr(resp, "model", None)
+        u = getattr(resp, "usage", None)
+        record_usage(self.name, getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0))
         if resp.stop_reason == "refusal":
             details = getattr(resp, "stop_details", None)
             category = getattr(details, "category", None) if details else None
-            raise LLMError(f"{self.name}: refused by safety classifier (category={category})")
+            raise LLMRefusalError(f"{self.name}: refused by safety classifier (category={category})")
         # 只取文字块：思考块（thinking）、fallback 标记块等都不是答案
         text = "".join(b.text for b in resp.content if b.type == "text")
         if not text.strip():
@@ -263,6 +320,108 @@ class AnthropicChatModel(ChatModel):
         if resp.stop_reason == "max_tokens":
             log.warning("claude output truncated by max_tokens", extra={"model": self.model, "max_tokens": self.max_tokens})
         return text
+
+
+# --------------------------------------------------------------------------- 熔断 + 指标
+
+
+class CircuitBreaker:
+    """熔断器（三种状态）：
+
+    - **closed（正常）**：请求照常发；连续失败达到 ``failures`` 次 → open。
+    - **open（断开）**：``cooldown_s`` 秒内直接拒绝，不发请求——主模型挂了的时候，
+      请求立刻切到备用厂家，而不是每个请求都先傻等一次超时（60 秒 × 重试次数）。
+    - **half-open（试探）**：冷却结束后只放**一个**请求过去：成功 → closed，失败 → 再断开一个冷却期。
+
+    ``failures=0`` 表示不熔断。线程安全。
+    """
+
+    def __init__(self, failures: int = 3, cooldown_s: float = 30.0, clock: Callable[[], float] = time.monotonic):
+        self.threshold, self.cooldown_s, self.clock = failures, cooldown_s, clock
+        self._lock = threading.Lock()
+        self._consecutive = 0
+        self._opened_at: float | None = None
+        self._trial_in_flight = False
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            if self._opened_at is None:
+                return "closed"
+            return "half_open" if self.clock() - self._opened_at >= self.cooldown_s else "open"
+
+    def allow(self) -> bool:
+        with self._lock:
+            if self._opened_at is None:
+                return True
+            if self.clock() - self._opened_at >= self.cooldown_s and not self._trial_in_flight:
+                self._trial_in_flight = True  # half-open：只放一个试探请求
+                return True
+            return False
+
+    def success(self) -> None:
+        with self._lock:
+            self._consecutive, self._opened_at, self._trial_in_flight = 0, None, False
+
+    def failure(self) -> bool:
+        """记录一次失败；返回 True 表示熔断器因此（重新）断开。"""
+        with self._lock:
+            self._consecutive += 1
+            was_trial, self._trial_in_flight = self._trial_in_flight, False
+            if self.threshold and (was_trial or (self._opened_at is None and self._consecutive >= self.threshold)):
+                self._opened_at = self.clock()
+                return True
+            return False
+
+
+class GuardedChatModel(ChatModel):
+    """包在每个厂家外面：熔断 + 监控指标（调用次数 / 结果 / 耗时）。``build_chat_model`` 自动加上。"""
+
+    def __init__(self, inner: ChatModel, breaker: CircuitBreaker) -> None:
+        self.inner, self.breaker = inner, breaker
+        self.provider, self.model = inner.provider, inner.model
+
+    @property
+    def name(self) -> str:
+        return self.inner.name
+
+    def complete(self, system: str, user: str, json_schema: dict[str, Any] | None = None) -> str:
+        base = f"{self.provider}:{self.model}"  # 指标标签用配置的名字（不随服务端 fallback 变化）
+        if not self.breaker.allow():
+            metrics.LLM_REQUESTS.labels(base, "circuit_open").inc()
+            raise LLMError(f"{base}: circuit open (skipped for up to {self.breaker.cooldown_s:.0f}s after repeated failures)")
+        t0 = time.perf_counter()
+        try:
+            out = self.inner.complete(system, user, json_schema)
+        except LLMRefusalError:
+            self.breaker.success()  # 服务正常，只是这条内容被拒
+            metrics.LLM_REQUESTS.labels(base, "refused").inc()
+            raise
+        except Exception:
+            if self.breaker.failure():
+                log.warning("llm circuit opened", extra={"model": base, "cooldown_s": self.breaker.cooldown_s})
+                metrics.LLM_CIRCUIT_OPEN.labels(base).set(1)
+            metrics.LLM_REQUESTS.labels(base, "error").inc()
+            raise
+        finally:
+            metrics.LLM_LATENCY.labels(base).observe(time.perf_counter() - t0)
+        self.breaker.success()
+        metrics.LLM_CIRCUIT_OPEN.labels(base).set(0)
+        metrics.LLM_REQUESTS.labels(base, "ok").inc()
+        return out
+
+
+def unwrap(m: ChatModel) -> ChatModel:
+    """去掉 GuardedChatModel 外壳，拿到具体厂家的 adapter（测试 / 排查用）。"""
+    return unwrap(m.inner) if isinstance(m, GuardedChatModel) else m
+
+
+def circuit_states(m: ChatModel | None) -> dict[str, str]:
+    """每个厂家的熔断状态，给 /readyz 和 servicekb doctor 用。"""
+    if m is None:
+        return {}
+    models = m.models if isinstance(m, FallbackChatModel) else [m]
+    return {f"{x.provider}:{x.model}": x.breaker.state for x in models if isinstance(x, GuardedChatModel)}
 
 
 # --------------------------------------------------------------------------- 主备切换
@@ -345,7 +504,9 @@ def build_chat_model(s: Settings, spec: LLMSpec | None = None, with_fallbacks: b
     primary = spec or s.primary_llm_spec()
     if primary.provider == "extractive":
         return None
-    models = [_build_one(primary, s)]
-    if with_fallbacks:
-        models += [_build_one(f, s) for f in s.llm_fallbacks if f.provider != "extractive"]
+    specs = [primary] + ([f for f in s.llm_fallbacks if f.provider != "extractive"] if with_fallbacks else [])
+    models: list[ChatModel] = [
+        GuardedChatModel(_build_one(sp, s), CircuitBreaker(s.llm_circuit_failures, s.llm_circuit_cooldown_s))
+        for sp in specs
+    ]
     return models[0] if len(models) == 1 else FallbackChatModel(models)

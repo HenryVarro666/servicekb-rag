@@ -23,6 +23,7 @@ from servicekb.generation.llm import (
     OpenAIChatModel,
     build_chat_model,
     parse_json,
+    unwrap,
 )
 from tests.conftest import memory_settings
 
@@ -216,7 +217,7 @@ def test_fallback_chain_uses_next_provider_and_reports_who_answered():
 def test_build_chat_model_from_settings(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-from-env")
     assert build_chat_model(memory_settings()) is None  # 默认 extractive：不调用大模型
-    m = build_chat_model(memory_settings(llm_provider="deepseek", llm_model="deepseek-chat"))
+    m = unwrap(build_chat_model(memory_settings(llm_provider="deepseek", llm_model="deepseek-chat")))
     assert isinstance(m, OpenAIChatModel) and m.preset.base_url == "https://api.deepseek.com"
     assert m.client.api_key == "sk-from-env"  # 没配 SERVICEKB_LLM_API_KEY → 读厂家自己的环境变量
 
@@ -229,7 +230,7 @@ def test_build_chat_model_from_settings(monkeypatch):
     # 临时指定另一个厂家时不带备用厂家
     one = build_chat_model(memory_settings(llm_fallbacks=[LLMSpec(provider="vllm", model="q")]),
                            LLMSpec(provider="ollama", model="qwen3:8b"), with_fallbacks=False)
-    assert isinstance(one, OpenAIChatModel) and one.name == "ollama:qwen3:8b"
+    assert isinstance(unwrap(one), OpenAIChatModel) and one.name == "ollama:qwen3:8b"
 
     with pytest.raises(ValueError, match="unknown llm provider"):
         build_chat_model(memory_settings(llm_provider="nope"))
@@ -242,10 +243,11 @@ def test_build_chat_model_from_settings(monkeypatch):
 @needs_anthropic
 def test_claude_defaults_and_legacy_config(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env")
-    m = build_chat_model(memory_settings(llm_provider="anthropic"))
+    m = unwrap(build_chat_model(memory_settings(llm_provider="anthropic")))
     assert isinstance(m, AnthropicChatModel) and m.model == "claude-opus-5-5" and m.max_tokens == 16000
     # 旧配置 llm_backend=openai + base_url 指向 vLLM：仍然可用，按兼容接口处理
-    legacy = build_chat_model(memory_settings(llm_backend="openai", llm_model="q", llm_base_url="http://gpu:8000/v1"))
+    legacy = unwrap(build_chat_model(memory_settings(llm_backend="openai", llm_model="q",
+                                                     llm_base_url="http://gpu:8000/v1")))
     assert isinstance(legacy, OpenAIChatModel) and legacy.provider == "openai"
     assert legacy.preset.max_tokens_param == "max_tokens" and legacy.preset.json_mode == "object"
 
