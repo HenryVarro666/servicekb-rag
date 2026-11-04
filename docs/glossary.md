@@ -48,6 +48,11 @@
 | 评估集 | Golden set | 带标注的问题集合 | `eval/golden_qa.jsonl` |
 | TEI | Text Embeddings Inference | HuggingFace 的向量 / 重排模型推理服务 | `docker-compose.yml` |
 | vLLM | — | 高吞吐 LLM 推理服务，提供 OpenAI 兼容接口 | `docker-compose.yml` |
+| OpenAI 兼容接口 | OpenAI-compatible API | 和 OpenAI 的 `/v1/chat/completions` 格式一样的接口；大多数厂商和推理框架都提供，接入只需改地址和 Key | `generation/llm.py` |
+| 适配器 | Adapter | 把各家不同的接口包装成同一个接口（`ChatModel.complete()`），上层代码不用关心是哪家 | `generation/llm.py` |
+| 主备切换 | Fallback | 主模型失败时按顺序换备用厂家；全部失败则降级为抽取式回答 | `FallbackChatModel` |
+| 结构化输出 | Structured outputs | 让模型严格按 JSON Schema 输出，保证格式合法（内容仍需校验） | `chat/llm_extract.py` |
+| 思考深度 | Effort | Claude 的参数：控制模型回答前"想"多少，越高越慢越贵 | `SERVICEKB_LLM_EFFORT` |
 | RSC | Resource-Specific Consent | Teams 资源级授权，由 Team owner 授予应用读取某个 Team 的权限 | docs/09 |
 | 会话切分 | Sessionization | 把无线程的聊天流按时间间隔切成会话 | `chat/cleaner.py::build_threads` |
 | 对话解缠 | Conversation disentanglement | 把交错的多话题聊天分开 | docs/09 |

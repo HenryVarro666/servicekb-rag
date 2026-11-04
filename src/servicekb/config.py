@@ -21,8 +21,25 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class LLMSpec(BaseModel):
+    """一个"厂家 + 模型"的完整配置。主模型和每个备用模型都是一个 LLMSpec。"""
+
+    provider: str
+    model: str | None = None
+    base_url: str | None = None
+    api_key: SecretStr | None = None
+    api_key_env: str | None = None  # 指定从哪个环境变量读 key（默认用厂家约定的变量名）
+    temperature: float | None = 0.1
+    max_tokens: int | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = "medium"
+    azure_api_version: str = "2024-10-21"
+    aws_region: str | None = None
+    gcp_project_id: str | None = None
+    gcp_region: str = "global"
 
 
 class Settings(BaseSettings):
@@ -31,6 +48,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        env_parse_none_str="none",  # 环境变量写 none 表示"不设置"，例如 SERVICEKB_LLM_TEMPERATURE=none
     )
 
     # ------------------------------------------------------------------ 存储
@@ -71,17 +89,55 @@ class Settings(BaseSettings):
     # 重排分数（sigmoid 后 0~1）低于此值的证据视为"不相关"。需要在你们自己的评估集上校准！
     reranker_min_score: float = 0.15
 
-    # ------------------------------------------------------------------ 大模型（LLM）
-    # extractive: 不调用任何大模型，从证据里抽句子拼答案。离线 demo 用。
-    # openai    : OpenAI 或任何 OpenAI-compatible 的 /v1/chat/completions（vLLM、Ollama、Azure 代理等）。
-    llm_backend: Literal["extractive", "openai"] = "extractive"
-    llm_base_url: str | None = None  # None=OpenAI 官方；vLLM 例: http://gpu-box:8000/v1
-    llm_api_key: SecretStr | None = None
-    llm_model: str = "gpt-4o-mini"  # 换成你们账号 / 本地服务实际可用的模型名
-    llm_temperature: float = 0.1  # 问答类任务要"稳"，温度低一些
-    llm_max_tokens: int = 1024
+    # ------------------------------------------------------------------ 大模型（LLM），见 docs/11
+    # 厂家（provider）：
+    #   extractive        不调用任何大模型，从证据里抽句子拼答案（离线 demo / 降级）
+    #   openai            OpenAI 官方
+    #   azure_openai      Azure OpenAI（model 填部署名）
+    #   anthropic         Anthropic Claude 官方 API（原生 SDK，pip install -e ".[anthropic]"）
+    #   anthropic_bedrock Claude on Amazon Bedrock      anthropic_vertex  Claude on Google Vertex AI
+    #   gemini            Google Gemini（OpenAI 兼容接口）
+    #   deepseek / qwen / moonshot / zhipu    国内厂商（OpenAI 兼容接口）
+    #   vllm / ollama     本地部署（OpenAI 兼容接口）
+    #   openai_compatible 其他任何 OpenAI 兼容服务（必须填 llm_base_url）
+    # 运行 `servicekb llm providers` 查看每家的默认地址和 API Key 环境变量。
+    llm_provider: str = "extractive"
+    llm_backend: Literal["extractive", "openai"] | None = None  # 旧配置项，仅为兼容保留；请改用 llm_provider
+    llm_model: str | None = None  # 必须按厂家填写实际可用的模型名（anthropic 默认 claude-opus-5-5）
+    llm_base_url: str | None = None  # 覆盖厂家默认地址（例如自建网关、vLLM 地址）
+    llm_api_key: SecretStr | None = None  # 不填时读取厂家自己的环境变量，例如 DEEPSEEK_API_KEY
+    # 采样温度：none = 不发送。Claude 当前模型不支持 temperature（adapter 自动不发）；
+    # OpenAI 的推理模型（o 系列等）也只接受默认温度，用这类模型时设 SERVICEKB_LLM_TEMPERATURE=none
+    llm_temperature: float | None = 0.1
+    llm_max_tokens: int | None = None  # None = 厂家默认（Claude 16000，因为思考也占输出 token；其他 1024）
     llm_timeout_s: float = 60.0
-    llm_max_retries: int = 2
+    llm_max_retries: int = 2  # SDK 内置重试（429 / 5xx / 网络错误）
+    # Claude 专用：思考深度（low / medium / high / xhigh / max）；RAG 问答 medium 足够
+    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = "medium"
+    # Claude 官方 API 专用：被安全分类器拒答时，服务端自动换模型重跑（server-side fallback）
+    anthropic_server_fallbacks: bool = True
+    azure_api_version: str = "2024-10-21"
+    aws_region: str | None = None  # anthropic_bedrock
+    gcp_project_id: str | None = None  # anthropic_vertex
+    gcp_region: str = "global"  # anthropic_vertex
+    # 备用厂家（按顺序）：主模型报错 / 超时 / 拒答时依次尝试。JSON 数组，每项字段同上（不带 llm_ 前缀）：
+    # SERVICEKB_LLM_FALLBACKS='[{"provider":"vllm","model":"Qwen/Qwen3-32B","base_url":"http://gpu:8000/v1"}]'
+    llm_fallbacks: list[LLMSpec] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _compat_llm_backend(self) -> Settings:
+        # 旧版本只有 llm_backend=openai（含 vLLM 等兼容服务），映射到新的 provider
+        if self.llm_backend == "openai" and self.llm_provider == "extractive":
+            self.llm_provider = "openai"
+        return self
+
+    def primary_llm_spec(self) -> LLMSpec:
+        return LLMSpec(
+            provider=self.llm_provider, model=self.llm_model, base_url=self.llm_base_url, api_key=self.llm_api_key,
+            temperature=self.llm_temperature, max_tokens=self.llm_max_tokens, effort=self.llm_effort,
+            azure_api_version=self.azure_api_version, aws_region=self.aws_region,
+            gcp_project_id=self.gcp_project_id, gcp_region=self.gcp_region,
+        )
 
     # ------------------------------------------------------------------ 解析（Parsing）
     # pypdf  : 只抽文本层，快、零依赖；扫描件会报错。

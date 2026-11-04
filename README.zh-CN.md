@@ -11,6 +11,7 @@
 - 🔐 **权限与合规**：块级 ACL、PII 脱敏、证据不足自动拒答并标记升级
 - 💬 **聊天记录清洗**：Teams 导出 → 线程重建 → 问答抽取 → 人工审核分流（[详细指南](docs/09_chat_log_cleaning.md)）
 - 📷 **拍照识别备件**：现场照片 → SigLIP 外观匹配 + 标签 / 铭牌 OCR → 候选料号（长得像的会提醒）→ 交给知识库回答（[详细指南](docs/10_part_photo_recognition.md)）
+- 🤖 **多厂家大模型**：OpenAI、Azure OpenAI、Claude（Anthropic 官方 / Bedrock / Vertex AI）、Gemini、DeepSeek、通义千问、Kimi、智谱 GLM、本地 vLLM / Ollama——改配置即可切换，主模型故障自动换备用厂家（[详细指南](docs/11_llm_providers.md)）
 - 📏 **自带评估**：检索 hit@k / MRR / nDCG + 回答关键事实召回 + 拒答准确率，CI 回归门禁
 - 🎓 **为新人而写**：每个模块开头都解释"这一步在 RAG 里是干什么的、为什么这么做"
 
@@ -151,7 +152,7 @@ servicekb ask "E037 早上出现中午消失"
 | --- | --- | --- | --- |
 | 向量模型 | `BAAI/bge-m3`（中英混合、1024 维、8192 长度） | 48GB 卡，TEI 容器 | `EMBEDDING_BACKEND=openai` + `EMBEDDING_BASE_URL=http://gpu:8080/v1` + `EMBEDDING_DIM=1024` |
 | 重排模型 | `BAAI/bge-reranker-v2-m3` | 48GB 卡，TEI 容器 | `RERANKER_BACKEND=tei` + `RERANKER_URL=http://gpu:8081` |
-| 大模型 | OpenAI API，或本地 vLLM（96GB 卡可跑 30B 级模型） | 96GB 卡 / 云 | `LLM_BACKEND=openai` + `LLM_MODEL=...`（+ `LLM_BASE_URL` 指向 vLLM）|
+| 大模型 | 任意厂家（OpenAI / Azure / Claude / Gemini / DeepSeek / 通义……），或本地 vLLM（96GB 卡可跑 30B 级模型） | 96GB 卡 / 云 | `LLM_PROVIDER=openai\|anthropic\|deepseek\|vllm…` + `LLM_MODEL=...`，见下文 |
 | 图像向量 | `google/siglip-so400m-patch14-384`（1152 维），或已有的图像编码服务 | 48GB 卡 | `IMAGE_EMBEDDING_BACKEND=siglip`（或 `http` + `IMAGE_EMBEDDING_URL`），`pip install -e ".[vision]"` |
 | OCR | RapidOCR（中英文，CPU 即可） | API 服务器 | `OCR_BACKEND=rapidocr`，`pip install -e ".[ocr]"` |
 
@@ -162,6 +163,30 @@ servicekb db reset --yes && servicekb db init && servicekb ingest   # 换了向�
 ```
 
 以上配置项都带 `SERVICEKB_` 前缀，完整列表见 [`src/servicekb/config.py`](src/servicekb/config.py)，部署细节、GPU 规划、安全清单见 [docs/06_deployment.md](docs/06_deployment.md)。
+
+### 选择大模型厂家
+
+所有厂家都藏在同一个小接口后面（[`generation/llm.py`](src/servicekb/generation/llm.py) 的 `ChatModel.complete()`）。
+各家的差异——Claude 的 `system` 是单独参数、不支持 `temperature`，Azure 的部署名 URL，`max_tokens` 和 `max_completion_tokens`，
+JSON 输出模式，拒答——都在 adapter 里处理掉了，上层代码不用关心。
+
+```bash
+servicekb llm providers                          # 支持哪些厂家、默认地址、哪些 API Key 已设置
+
+export SERVICEKB_LLM_PROVIDER=anthropic          # 或 openai / azure_openai / gemini / deepseek / qwen / vllm / ...
+export ANTHROPIC_API_KEY=sk-ant-...              # 各家自己的 Key 变量（或统一用 SERVICEKB_LLM_API_KEY）
+pip install -e ".[anthropic]"                    # 只有 Claude 需要：Anthropic 原生 SDK；模型默认 claude-opus-5-5
+servicekb llm test                               # 发一条很短的请求，检查地址 / Key / 模型名
+
+servicekb ask "E037 怎么处理？" --provider deepseek --llm-model deepseek-chat   # 临时换一家
+
+# 备用厂家：主模型报错 / 超时 / 拒答时按顺序尝试
+export SERVICEKB_LLM_FALLBACKS='[{"provider":"vllm","model":"Qwen/Qwen3-32B","base_url":"http://gpu:8000/v1"}]'
+```
+
+所有厂家都失败时，自动降级为抽取式回答（`model=extractive-fallback`），而不是给用户报错页面。
+Claude 官方 API 上默认开启了服务端 fallback（请求被拒答时由服务端换模型重跑），不需要可设 `SERVICEKB_ANTHROPIC_SERVER_FALLBACKS=false`。
+详细说明、数据合规建议、排错表见 [docs/11_llm_providers.md](docs/11_llm_providers.md)。
 
 ---
 
@@ -203,6 +228,7 @@ servicekb-rag/
 │   │   └── rerank.py               #   cross-encoder / TEI 重排
 │   ├── generation/
 │   │   ├── prompts.py              #   prompt（带版本号）
+│   │   ├── llm.py                  #   多厂家大模型接口（OpenAI / Azure / Claude / 兼容接口）+ 主备切换
 │   │   └── generator.py            #   LLM / 抽取式降级 + 引用校验
 │   ├── chat/                       # 【聊天记录清洗】Teams HTML、线程、名册、问答抽取、分流
 │   ├── vision/                     # 【拍照识别】图片处理、SigLIP / 手工特征 / HTTP 图像向量、OCR、
@@ -289,6 +315,8 @@ servicekb-rag/
 
 **给某个料号添加参考照片**：把图片放进 `data/sample/part_images/<料号>/`（正面、侧面、标签特写、装机状态），运行 `servicekb ingest --only part_images`，没变的图会自动跳过。
 
+**换大模型厂家 / 对比几家的效果**：设置 `SERVICEKB_LLM_PROVIDER` + `SERVICEKB_LLM_MODEL`，用 `servicekb llm test` 测通，然后每家跑一遍 `servicekb eval` 对比，见 [docs/11](docs/11_llm_providers.md#7-怎么选厂家)。
+
 **清洗 Teams 聊天记录**：`servicekb chat clean`，详见 [docs/09_chat_log_cleaning.md](docs/09_chat_log_cleaning.md)。
 
 ![Teams 聊天记录清洗漏斗](docs/images/chat_cleaning.zh.svg)
@@ -314,6 +342,7 @@ servicekb-rag/
 | 9 | [08 不足与路线图](docs/08_limitations_roadmap.md) | 接下来做什么 |
 | 10 | [09 聊天记录清洗](docs/09_chat_log_cleaning.md) | 要处理 Teams / Slack / 企业微信记录 |
 | 11 | [10 拍照识别备件](docs/10_part_photo_recognition.md) | SigLIP、OCR、参考图库、长得像的零件、阈值校准 |
+| 12 | [11 多厂家大模型](docs/11_llm_providers.md) | 切换厂家、主备切换、各家接口差异、接入新厂家 |
 | — | [术语表](docs/glossary.md) | 随时查 |
 
 ---

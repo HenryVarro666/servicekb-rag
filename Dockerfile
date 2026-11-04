@@ -13,7 +13,9 @@ WORKDIR /app
 # 先只拷依赖声明，利用 Docker 层缓存：代码改动不会触发重新安装依赖
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install .
+# EXTRAS：按需装可选依赖，例如 docker build --build-arg EXTRAS=anthropic,ocr .
+ARG EXTRAS=anthropic
+RUN pip install ".[${EXTRAS}]"
 
 COPY configs ./configs
 COPY data ./data

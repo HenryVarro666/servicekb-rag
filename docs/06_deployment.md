@@ -23,7 +23,7 @@ flowchart LR
     subgraph GPU 96GB
         VLLM[vLLM: 30B 级模型]
     end
-    EXT[OpenAI API]
+    EXT[云端大模型 API<br/>OpenAI / Claude / DeepSeek …]
     U1 --> GW --> API
     API --> PG & TE & TR
     API --> VLLM
@@ -40,9 +40,11 @@ flowchart LR
 | 48GB | 余量 | ~40 GB | 留给 OCR、SigLIP 图像编码（备件识别）、docling / MinerU 解析 |
 | 96GB | vLLM 30B 级模型（bf16 权重约 60 GB）| 约 85 GB（`gpu-memory-utilization 0.9`）| 剩余显存做 KV cache，支持并发和长上下文 |
 
-也可以全部用 OpenAI API，只把 embedding / rerank 放本地（这两个模型小、调用频繁，本地部署更划算，而且导入时的文档内容不出公司）。
+也可以全部用云端大模型 API（OpenAI、Claude、DeepSeek、通义……任选，见 [docs/11](11_llm_providers.md)），只把 embedding / rerank 放本地（这两个模型小、调用频繁，本地部署更划算，而且导入时的文档内容不出公司）。
 
 选择本地 LLM 时，在你们的评估集上比较几个候选模型，而不是只看公开榜单。注意模型许可证。
+
+推荐的组合：云端模型做主模型、本地 vLLM 做备用（`SERVICEKB_LLM_FALLBACKS`），云端故障时问答不中断；聊天记录抽取直接用本地模型（数据不出公司）。
 
 ## 3. Docker Compose
 
@@ -73,7 +75,7 @@ curl localhost:8000/readyz
 
 ## 5. 配置与密钥
 
-- 所有配置走环境变量（`SERVICEKB_*`），密钥（数据库密码、`LLM_API_KEY`、`GRAPH_CLIENT_SECRET`）放密钥管理系统（Azure Key Vault 等），**不进 git、不进 sources.yaml**。
+- 所有配置走环境变量（`SERVICEKB_*`），密钥（数据库密码、`LLM_API_KEY` / 各厂家的 `*_API_KEY`、`GRAPH_CLIENT_SECRET`）放密钥管理系统（Azure Key Vault 等），**不进 git、不进 sources.yaml**。
 - `.env` 已在 `.gitignore` 里。
 
 ## 6. 安全清单
@@ -111,7 +113,8 @@ curl localhost:8000/readyz
 | 某文档一直 `failed` | `SELECT error FROM documents WHERE status='failed'`；扫描件 → 换 docling；格式不支持 → 加解析器 |
 | 回答全是"知识库中没有找到" | reranker 阈值太高 / reranker 服务异常 / 数据没导入（`servicekb db stats`）|
 | 检索结果明显不相关 | 用 `servicekb search` 看三路排名；检查是否换过模型 |
-| LLM 回答用的 `extractive-fallback` | LLM 服务超时或报错，看日志里的 `llm_error` |
+| LLM 回答用的 `extractive-fallback` | 所有大模型厂家都失败了（超时 / 报错 / 拒答），看日志里的 `llm_error`；先跑 `servicekb llm test`，排错表见 [docs/11](11_llm_providers.md#9-常见问题排查) |
+| 回答的 `model` 经常是备用厂家 | 主模型限流或不稳定：查配额，或换主备顺序 |
 
 ## 9. 升级流程
 
